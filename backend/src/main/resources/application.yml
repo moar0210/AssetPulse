@@ -1,0 +1,20 @@
+spring:
+  application:
+    name: assetpulse-backend
+  flyway:
+    validate-migration-naming: true
+  jackson:
+    deserialization:
+      fail-on-unknown-properties: true
+
+server:
+  servlet:
+    session:
+      timeout: 30m
+      tracking-modes: cookie
+      cookie:
+        name: ASSETPULSE_SESSION
+        max-age: 30m
+        http-only: true
+        same-site: strict
+        secure: ${ASSETPULSE_SESSION_COOKIE_SECURE:true}

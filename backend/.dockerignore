@@ -1,0 +1,8 @@
+target/
+*.log
+.env
+.env.*
+.mvn/settings.xml
+.dockerignore
+Dockerfile
+mvnw.cmd

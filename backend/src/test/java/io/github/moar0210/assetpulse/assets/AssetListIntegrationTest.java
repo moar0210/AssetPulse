@@ -1,0 +1,370 @@
+package io.github.moar0210.assetpulse.assets;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.not;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+import java.util.stream.Stream;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.http.MediaType;
+import org.springframework.jdbc.core.simple.JdbcClient;
+import org.springframework.mock.web.MockHttpSession;
+import org.springframework.test.context.DynamicPropertyRegistry;
+import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.MvcResult;
+import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
+import org.springframework.transaction.annotation.Transactional;
+import org.testcontainers.containers.PostgreSQLContainer;
+import org.testcontainers.junit.jupiter.Container;
+import org.testcontainers.junit.jupiter.Testcontainers;
+import org.testcontainers.utility.DockerImageName;
+
+@SpringBootTest(properties = "ASSETPULSE_SESSION_COOKIE_SECURE=false")
+@AutoConfigureMockMvc
+@Testcontainers
+class AssetListIntegrationTest {
+
+    private static final String ASSETS_PATH = "/api/v1/assets";
+    private static final String SESSION_PATH = "/api/v1/session";
+    private static final String CSRF_PATH = SESSION_PATH + "/csrf";
+    private static final String DEMO_PASSWORD = "AssetPulse1!";
+    private static final UUID NORTHSTAR_ID =
+            UUID.fromString("00000000-0000-0000-0000-000000000001");
+    private static final UUID RIVERSIDE_ID =
+            UUID.fromString("00000000-0000-0000-0000-000000000002");
+    private static final ExpectedAsset BOILER_FEED_PUMP =
+            new ExpectedAsset(
+                    "20000000-0000-0000-0000-000000000001", "PUMP-101", "Boiler Feed Pump");
+    private static final ExpectedAsset COOLING_WATER_PUMP =
+            new ExpectedAsset(
+                    "20000000-0000-0000-0000-000000000002", "PUMP-102", "Cooling Water Pump");
+    private static final ExpectedAsset PROCESS_PUMP =
+            new ExpectedAsset("20000000-0000-0000-0000-000000000003", "PUMP-201", "Process Pump");
+
+    @Container
+    private static final PostgreSQLContainer<?> POSTGRESQL =
+            new PostgreSQLContainer<>(DockerImageName.parse("postgres:17.10-alpine"));
+
+    @DynamicPropertySource
+    static void datasourceProperties(DynamicPropertyRegistry registry) {
+        registry.add("spring.datasource.url", POSTGRESQL::getJdbcUrl);
+        registry.add("spring.datasource.username", POSTGRESQL::getUsername);
+        registry.add("spring.datasource.password", POSTGRESQL::getPassword);
+    }
+
+    @Autowired private MockMvc mockMvc;
+    @Autowired private ObjectMapper objectMapper;
+    @Autowired private JdbcClient jdbcClient;
+
+    @Test
+    void anonymousRequestsReceiveANonLeakingAuthenticationProblem() throws Exception {
+        mockMvc.perform(get(ASSETS_PATH).accept(MediaType.APPLICATION_JSON))
+                .andExpect(status().isUnauthorized())
+                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
+                .andExpect(jsonPath("$.code").value("AUTHENTICATION_REQUIRED"))
+                .andExpect(jsonPath("$.correlationId").isNotEmpty())
+                .andExpect(header().exists("X-Correlation-ID"))
+                .andExpect(content().string(not(containsString("Northstar"))))
+                .andExpect(content().string(not(containsString("Riverside"))))
+                .andExpect(content().string(not(containsString("Pump"))));
+    }
+
+    @ParameterizedTest
+    @MethodSource("authorisedAccounts")
+    void everySeededRoleReadsOnlyItsOrganisationsAssets(
+            String email, List<ExpectedAsset> expectedAssets, List<ExpectedAsset> foreignAssets)
+            throws Exception {
+        JsonNode response = listAssets(login(email));
+
+        assertExactAssets(response, expectedAssets);
+        assertForeignAssetsAbsent(response, foreignAssets);
+    }
+
+    @ParameterizedTest
+    @MethodSource("scopeSpoofAttempts")
+    void browserSuppliedScopeCannotRevealAnotherOrganisationsAssetsOrCount(
+            String email,
+            UUID spoofedOrganisationId,
+            List<ExpectedAsset> expectedAssets,
+            List<ExpectedAsset> foreignAssets)
+            throws Exception {
+        MockHttpSession session = login(email);
+        MvcResult result =
+                mockMvc.perform(
+                                get(ASSETS_PATH)
+                                        .session(session)
+                                        .queryParam(
+                                                "organisationId", spoofedOrganisationId.toString())
+                                        .queryParam("organisation", "foreign-tenant")
+                                        .header(
+                                                "X-Organisation-ID",
+                                                spoofedOrganisationId.toString())
+                                        .header("X-Organisation", "foreign-tenant")
+                                        .header("X-Role", "OPERATIONS_ADMIN")
+                                        .accept(MediaType.APPLICATION_JSON))
+                        .andExpect(status().isOk())
+                        .andExpect(header().string("Cache-Control", "no-store"))
+                        .andReturn();
+        JsonNode response = objectMapper.readTree(result.getResponse().getContentAsString());
+
+        assertExactAssets(response, expectedAssets);
+        assertForeignAssetsAbsent(response, foreignAssets);
+    }
+
+    @Test
+    @Transactional
+    void responseHasExplicitFieldsAndDeterministicNameThenIdOrder() throws Exception {
+        UUID lowerId = UUID.fromString("21000000-0000-0000-0000-000000000001");
+        UUID higherId = UUID.fromString("21000000-0000-0000-0000-000000000002");
+        insertAsset(higherId, NORTHSTAR_ID, "AUX-102", "Auxiliary Pump");
+        insertAsset(lowerId, NORTHSTAR_ID, "AUX-101", "Auxiliary Pump");
+        MockHttpSession session = login("admin@northstar.example");
+
+        MvcResult first =
+                mockMvc.perform(
+                                get(ASSETS_PATH)
+                                        .session(session)
+                                        .accept(MediaType.APPLICATION_JSON))
+                        .andExpect(status().isOk())
+                        .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
+                        .andExpect(header().string("Cache-Control", "no-store"))
+                        .andReturn();
+        MvcResult second =
+                mockMvc.perform(
+                                get(ASSETS_PATH)
+                                        .session(session)
+                                        .accept(MediaType.APPLICATION_JSON))
+                        .andExpect(status().isOk())
+                        .andReturn();
+        JsonNode response = objectMapper.readTree(first.getResponse().getContentAsString());
+
+        assertThat(second.getResponse().getContentAsString())
+                .isEqualTo(first.getResponse().getContentAsString());
+        assertThat(response.fieldNames()).toIterable().containsExactly("assets");
+        assertThat(response.path("assets").size()).isEqualTo(4);
+        assertThat(response.path("assets").get(0).path("id").asText())
+                .isEqualTo(lowerId.toString());
+        assertThat(response.path("assets").get(1).path("id").asText())
+                .isEqualTo(higherId.toString());
+        assertThat(assetNames(response))
+                .containsExactly(
+                        "Auxiliary Pump",
+                        "Auxiliary Pump",
+                        "Boiler Feed Pump",
+                        "Cooling Water Pump");
+        response.path("assets")
+                .forEach(
+                        asset ->
+                                assertThat(asset.fieldNames())
+                                        .toIterable()
+                                        .containsExactly("id", "assetCode", "name"));
+    }
+
+    @Test
+    @Transactional
+    void organisationQueryHasAFixedOneHundredAssetBound() throws Exception {
+        for (int index = 0; index < 101; index++) {
+            insertAsset(
+                    UUID.fromString("30000000-0000-0000-0000-%012d".formatted(index + 1)),
+                    NORTHSTAR_ID,
+                    "GENERATED-%03d".formatted(index),
+                    "Generated Asset %03d".formatted(index));
+        }
+        assertThat(
+                        jdbcClient
+                                .sql(
+                                        "SELECT COUNT(*)::integer FROM asset WHERE organisation_id = :organisationId")
+                                .param("organisationId", NORTHSTAR_ID)
+                                .query(Integer.class)
+                                .single())
+                .isEqualTo(103);
+
+        JsonNode response = listAssets(login("viewer@northstar.example"));
+
+        assertThat(response.path("assets").size()).isEqualTo(100);
+        assertThat(response.path("assets").get(0).path("name").asText())
+                .isEqualTo("Boiler Feed Pump");
+        assertThat(response.path("assets").get(99).path("name").asText())
+                .isEqualTo("Generated Asset 097");
+        assertThat(response.toString())
+                .doesNotContain("Generated Asset 098")
+                .doesNotContain("Generated Asset 099")
+                .doesNotContain("Generated Asset 100");
+    }
+
+    @Test
+    void assetMutationRoutesRemainAbsent() throws Exception {
+        MockHttpSession session = login("admin@northstar.example");
+        CsrfExchange csrf = csrf(session);
+        List<MockHttpServletRequestBuilder> mutations =
+                List.of(
+                        post(ASSETS_PATH),
+                        put(ASSETS_PATH),
+                        patch(ASSETS_PATH),
+                        delete(ASSETS_PATH));
+
+        for (MockHttpServletRequestBuilder mutation : mutations) {
+            mockMvc.perform(
+                            mutation.session(session)
+                                    .header(csrf.headerName(), csrf.token())
+                                    .contentType(MediaType.APPLICATION_JSON)
+                                    .content("{}"))
+                    .andExpect(status().isMethodNotAllowed());
+        }
+    }
+
+    private JsonNode listAssets(MockHttpSession session) throws Exception {
+        MvcResult result =
+                mockMvc.perform(
+                                get(ASSETS_PATH)
+                                        .session(session)
+                                        .accept(MediaType.APPLICATION_JSON))
+                        .andExpect(status().isOk())
+                        .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
+                        .andExpect(header().string("Cache-Control", "no-store"))
+                        .andReturn();
+        return objectMapper.readTree(result.getResponse().getContentAsString());
+    }
+
+    private List<String> assetNames(JsonNode response) {
+        List<String> names = new ArrayList<>();
+        response.path("assets").forEach(asset -> names.add(asset.path("name").asText()));
+        return names;
+    }
+
+    private void assertExactAssets(JsonNode response, List<ExpectedAsset> expectedAssets) {
+        assertThat(response.fieldNames()).toIterable().containsExactly("assets");
+        assertThat(response.path("assets").size()).isEqualTo(expectedAssets.size());
+
+        for (int index = 0; index < expectedAssets.size(); index++) {
+            ExpectedAsset expected = expectedAssets.get(index);
+            JsonNode actual = response.path("assets").get(index);
+            assertThat(actual.fieldNames()).toIterable().containsExactly("id", "assetCode", "name");
+            assertThat(actual.path("id").asText()).isEqualTo(expected.id());
+            assertThat(actual.path("assetCode").asText()).isEqualTo(expected.assetCode());
+            assertThat(actual.path("name").asText()).isEqualTo(expected.name());
+        }
+    }
+
+    private void assertForeignAssetsAbsent(JsonNode response, List<ExpectedAsset> foreignAssets) {
+        assertThat(response.has("totalCount")).isFalse();
+        String payload = response.toString();
+        foreignAssets.forEach(
+                asset ->
+                        assertThat(payload)
+                                .doesNotContain(asset.id())
+                                .doesNotContain(asset.assetCode())
+                                .doesNotContain(asset.name()));
+    }
+
+    private MockHttpSession login(String email) throws Exception {
+        CsrfExchange csrf = csrf(null);
+        mockMvc.perform(
+                        post(SESSION_PATH)
+                                .session(csrf.session())
+                                .header(csrf.headerName(), csrf.token())
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .accept(MediaType.APPLICATION_JSON)
+                                .content(
+                                        objectMapper.writeValueAsBytes(
+                                                Map.of(
+                                                        "email", email,
+                                                        "password", DEMO_PASSWORD))))
+                .andExpect(status().isOk());
+        return csrf.session();
+    }
+
+    private CsrfExchange csrf(MockHttpSession session) throws Exception {
+        MockHttpServletRequestBuilder request = get(CSRF_PATH).accept(MediaType.APPLICATION_JSON);
+        if (session != null) {
+            request.session(session);
+        }
+
+        MvcResult result =
+                mockMvc.perform(request)
+                        .andExpect(status().isOk())
+                        .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
+                        .andReturn();
+        JsonNode payload = objectMapper.readTree(result.getResponse().getContentAsString());
+        MockHttpSession resolvedSession = (MockHttpSession) result.getRequest().getSession(false);
+        assertThat(resolvedSession).isNotNull();
+        return new CsrfExchange(
+                resolvedSession,
+                payload.path("headerName").asText(),
+                payload.path("token").asText());
+    }
+
+    private void insertAsset(UUID id, UUID organisationId, String assetCode, String assetName) {
+        jdbcClient
+                .sql(
+                        """
+                        INSERT INTO asset (id, organisation_id, asset_code, name)
+                        VALUES (:id, :organisationId, :assetCode, :assetName)
+                        """)
+                .param("id", id)
+                .param("organisationId", organisationId)
+                .param("assetCode", assetCode)
+                .param("assetName", assetName)
+                .update();
+    }
+
+    private static Stream<Arguments> authorisedAccounts() {
+        return Stream.of(
+                Arguments.of(
+                        "admin@northstar.example",
+                        List.of(BOILER_FEED_PUMP, COOLING_WATER_PUMP),
+                        List.of(PROCESS_PUMP)),
+                Arguments.of(
+                        "technician@northstar.example",
+                        List.of(BOILER_FEED_PUMP, COOLING_WATER_PUMP),
+                        List.of(PROCESS_PUMP)),
+                Arguments.of(
+                        "viewer@northstar.example",
+                        List.of(BOILER_FEED_PUMP, COOLING_WATER_PUMP),
+                        List.of(PROCESS_PUMP)),
+                Arguments.of(
+                        "admin@riverside.example",
+                        List.of(PROCESS_PUMP),
+                        List.of(BOILER_FEED_PUMP, COOLING_WATER_PUMP)));
+    }
+
+    private static Stream<Arguments> scopeSpoofAttempts() {
+        return Stream.of(
+                Arguments.of(
+                        "admin@northstar.example",
+                        RIVERSIDE_ID,
+                        List.of(BOILER_FEED_PUMP, COOLING_WATER_PUMP),
+                        List.of(PROCESS_PUMP)),
+                Arguments.of(
+                        "admin@riverside.example",
+                        NORTHSTAR_ID,
+                        List.of(PROCESS_PUMP),
+                        List.of(BOILER_FEED_PUMP, COOLING_WATER_PUMP)));
+    }
+
+    private record CsrfExchange(MockHttpSession session, String headerName, String token) {}
+
+    private record ExpectedAsset(String id, String assetCode, String name) {}
+}

@@ -1,0 +1,111 @@
+name: assetpulse
+
+services:
+  postgres:
+    image: postgres:17.10-alpine3.23
+    environment:
+      POSTGRES_DB: assetpulse
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_ADMIN_PASSWORD:?POSTGRES_ADMIN_PASSWORD is required}
+      ASSETPULSE_APP_USERNAME: ${SPRING_DATASOURCE_USERNAME:?SPRING_DATASOURCE_USERNAME is required}
+      ASSETPULSE_APP_PASSWORD: ${SPRING_DATASOURCE_PASSWORD:?SPRING_DATASOURCE_PASSWORD is required}
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          'pg_isready --host=127.0.0.1 --username="$${POSTGRES_USER}" --dbname="$${POSTGRES_DB}"',
+        ]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
+    restart: unless-stopped
+    stop_grace_period: 15s
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./infra/postgres/init-application-role.sh:/docker-entrypoint-initdb.d/10-init-application-role.sh:ro
+    networks:
+      - database
+
+  backend:
+    image: assetpulse-backend:local
+    build:
+      context: ./backend
+      target: runtime
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/assetpulse
+      SPRING_DATASOURCE_USERNAME: ${SPRING_DATASOURCE_USERNAME:?SPRING_DATASOURCE_USERNAME is required}
+      SPRING_DATASOURCE_PASSWORD: ${SPRING_DATASOURCE_PASSWORD:?SPRING_DATASOURCE_PASSWORD is required}
+      ASSETPULSE_SESSION_COOKIE_SECURE: ${ASSETPULSE_SESSION_COOKIE_SECURE:-false}
+    depends_on:
+      postgres:
+        condition: service_healthy
+        restart: true
+    expose:
+      - "8080"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "wget",
+          "-q",
+          "-O",
+          "/dev/null",
+          "http://127.0.0.1:8080/api/v1/status",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    read_only: true
+    tmpfs:
+      - /tmp
+    restart: unless-stopped
+    stop_grace_period: 15s
+    networks:
+      - application
+      - database
+
+  frontend:
+    image: assetpulse-frontend:local
+    build:
+      context: ./frontend
+      target: runtime
+    depends_on:
+      backend:
+        condition: service_healthy
+        restart: true
+    ports:
+      - "${ASSETPULSE_HTTP_PORT:-8080}:8080"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "wget",
+          "-q",
+          "-O",
+          "/dev/null",
+          "http://127.0.0.1:8080/healthz",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    read_only: true
+    tmpfs:
+      - /tmp
+    restart: unless-stopped
+    stop_grace_period: 10s
+    networks:
+      - application
+      - edge
+
+networks:
+  application:
+    internal: true
+  database:
+    internal: true
+  edge:
+
+volumes:
+  postgres-data:
