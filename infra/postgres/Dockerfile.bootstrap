@@ -1,0 +1,10 @@
+# syntax=docker/dockerfile:1.7
+
+FROM postgres:17.10-alpine3.23
+
+COPY --chown=postgres:postgres --chmod=0555 init-application-role.sh /usr/local/bin/init-application-role.sh
+
+USER postgres
+
+ENTRYPOINT ["/usr/local/bin/init-application-role.sh"]
+CMD []
