@@ -50,8 +50,8 @@ class DatabaseMigrationTest {
             assertThat(readSeedRows(jdbcClient)).containsExactlyElementsOf(firstSeedRows);
         }
 
-        assertThat(firstState).isEqualTo(new DatabaseState("2", 2, 2, 3, 4, 3));
-        assertThat(firstSeedRows).hasSize(12);
+        assertThat(firstState).isEqualTo(new DatabaseState("5", 5, 2, 3, 4, 3, 3, 3, 0, 0));
+        assertThat(firstSeedRows).hasSize(18);
     }
 
     private ConfigurableApplicationContext startApplication() {
@@ -83,7 +83,11 @@ class DatabaseMigrationTest {
                 count(jdbcClient, "SELECT COUNT(*)::integer FROM organisation"),
                 count(jdbcClient, "SELECT COUNT(*)::integer FROM app_role"),
                 count(jdbcClient, "SELECT COUNT(*)::integer FROM app_user"),
-                count(jdbcClient, "SELECT COUNT(*)::integer FROM asset"));
+                count(jdbcClient, "SELECT COUNT(*)::integer FROM asset"),
+                count(jdbcClient, "SELECT COUNT(*)::integer FROM sensor"),
+                count(jdbcClient, "SELECT COUNT(*)::integer FROM threshold_rule"),
+                count(jdbcClient, "SELECT COUNT(*)::integer FROM telemetry_batch"),
+                count(jdbcClient, "SELECT COUNT(*)::integer FROM telemetry_reading"));
     }
 
     private List<String> readSeedRows(JdbcClient jdbcClient) {
@@ -123,6 +127,38 @@ class DatabaseMigrationTest {
                                 updated_at
                             )
                             FROM asset
+                            UNION ALL
+                            SELECT CONCAT_WS(
+                                '|',
+                                'sensor',
+                                id,
+                                organisation_id,
+                                asset_id,
+                                sensor_key,
+                                name,
+                                measurement_type,
+                                unit,
+                                created_at,
+                                updated_at
+                            )
+                            FROM sensor
+                            UNION ALL
+                            SELECT CONCAT_WS(
+                                '|',
+                                'threshold_rule',
+                                id,
+                                organisation_id,
+                                sensor_id,
+                                rule_code,
+                                name,
+                                comparison,
+                                threshold_value,
+                                cooldown_seconds,
+                                enabled,
+                                created_at,
+                                updated_at
+                            )
+                            FROM threshold_rule
                         ) seeded_state
                         ORDER BY seed_row
                         """)
@@ -143,6 +179,35 @@ class DatabaseMigrationTest {
                                 .query(Integer.class)
                                 .single())
                 .isEqualTo(4);
+
+        assertThat(
+                        jdbcClient
+                                .sql(
+                                        """
+                                        SELECT COUNT(*)::integer
+                                        FROM sensor s
+                                        JOIN asset a
+                                          ON a.organisation_id = s.organisation_id
+                                         AND a.id = s.asset_id
+                                        """)
+                                .query(Integer.class)
+                                .single())
+                .isEqualTo(3);
+
+        assertThat(
+                        jdbcClient
+                                .sql(
+                                        """
+                                        SELECT COUNT(*)::integer
+                                        FROM threshold_rule r
+                                        JOIN sensor s
+                                          ON s.organisation_id = r.organisation_id
+                                         AND s.id = r.sensor_id
+                                        WHERE r.enabled
+                                        """)
+                                .query(Integer.class)
+                                .single())
+                .isEqualTo(3);
 
         assertThat(
                         jdbcClient
@@ -218,6 +283,148 @@ class DatabaseMigrationTest {
                                         .update())
                 .isInstanceOf(DataIntegrityViolationException.class);
 
+        jdbcClient
+                .sql(
+                        """
+                        INSERT INTO telemetry_batch (
+                            id,
+                            organisation_id,
+                            idempotency_key,
+                            request_fingerprint,
+                            reading_count,
+                            accepted_at
+                        )
+                        VALUES (
+                            '50000000-0000-0000-0000-000000000001',
+                            '00000000-0000-0000-0000-000000000001',
+                            'constraint-evidence',
+                            '0000000000000000000000000000000000000000000000000000000000000000',
+                            1,
+                            '2026-08-13 12:00:00+00'
+                        )
+                        """)
+                .update();
+
+        assertThatThrownBy(
+                        () ->
+                                jdbcClient
+                                        .sql(
+                                                """
+                                                INSERT INTO telemetry_reading (
+                                                    id,
+                                                    organisation_id,
+                                                    batch_id,
+                                                    sequence_number,
+                                                    sensor_id,
+                                                    value,
+                                                    observed_at
+                                                )
+                                                VALUES (
+                                                    '60000000-0000-0000-0000-000000000001',
+                                                    '00000000-0000-0000-0000-000000000002',
+                                                    '50000000-0000-0000-0000-000000000001',
+                                                    0,
+                                                    '30000000-0000-0000-0000-000000000003',
+                                                    70.000000,
+                                                    '2026-08-13 12:00:00+00'
+                                                )
+                                                """)
+                                        .update())
+                .isInstanceOf(DataIntegrityViolationException.class);
+
+        assertThatThrownBy(
+                        () ->
+                                jdbcClient
+                                        .sql(
+                                                """
+                                                INSERT INTO telemetry_reading (
+                                                    id,
+                                                    organisation_id,
+                                                    batch_id,
+                                                    sequence_number,
+                                                    sensor_id,
+                                                    value,
+                                                    observed_at
+                                                )
+                                                VALUES (
+                                                    '60000000-0000-0000-0000-000000000002',
+                                                    '00000000-0000-0000-0000-000000000001',
+                                                    '50000000-0000-0000-0000-000000000001',
+                                                    0,
+                                                    '30000000-0000-0000-0000-000000000003',
+                                                    70.000000,
+                                                    '2026-08-13 12:00:00+00'
+                                                )
+                                                """)
+                                        .update())
+                .isInstanceOf(DataIntegrityViolationException.class);
+
+        jdbcClient
+                .sql(
+                        """
+                        DELETE FROM telemetry_batch
+                        WHERE id = '50000000-0000-0000-0000-000000000001'
+                        """)
+                .update();
+
+        assertThatThrownBy(
+                        () ->
+                                jdbcClient
+                                        .sql(
+                                                """
+                                                INSERT INTO sensor (
+                                                    id,
+                                                    organisation_id,
+                                                    asset_id,
+                                                    sensor_key,
+                                                    name,
+                                                    measurement_type,
+                                                    unit
+                                                )
+                                                VALUES (
+                                                    '39999999-0000-0000-0000-000000000001',
+                                                    '00000000-0000-0000-0000-000000000002',
+                                                    '20000000-0000-0000-0000-000000000001',
+                                                    'FOREIGN-TEMP',
+                                                    'Foreign Temperature',
+                                                    'TEMPERATURE',
+                                                    'CELSIUS'
+                                                )
+                                                """)
+                                        .update())
+                .isInstanceOf(DataIntegrityViolationException.class);
+
+        assertThatThrownBy(
+                        () ->
+                                jdbcClient
+                                        .sql(
+                                                """
+                                                INSERT INTO threshold_rule (
+                                                    id,
+                                                    organisation_id,
+                                                    sensor_id,
+                                                    rule_code,
+                                                    name,
+                                                    comparison,
+                                                    threshold_value,
+                                                    cooldown_seconds,
+                                                    enabled
+                                                )
+                                                VALUES (
+                                                    '49999999-0000-0000-0000-000000000001',
+                                                    '00000000-0000-0000-0000-000000000002',
+                                                    '30000000-0000-0000-0000-000000000001',
+                                                    'FOREIGN-HIGH-TEMP',
+                                                    'Foreign High Temperature',
+                                                    'GREATER_THAN_OR_EQUAL_TO',
+                                                    90.000000,
+                                                    300,
+                                                    TRUE
+                                                )
+                                                """)
+                                        .update())
+                .isInstanceOf(DataIntegrityViolationException.class);
+
         assertThatThrownBy(
                         () ->
                                 jdbcClient
@@ -251,5 +458,9 @@ class DatabaseMigrationTest {
             int organisations,
             int roles,
             int users,
-            int assets) {}
+            int assets,
+            int sensors,
+            int thresholdRules,
+            int telemetryBatches,
+            int telemetryReadings) {}
 }

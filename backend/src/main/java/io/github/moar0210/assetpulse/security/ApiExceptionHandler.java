@@ -1,11 +1,15 @@
 package io.github.moar0210.assetpulse.security;
 
+import io.github.moar0210.assetpulse.assets.AssetNotFoundException;
 import io.github.moar0210.assetpulse.identity.AlreadyAuthenticatedException;
 import io.github.moar0210.assetpulse.identity.AuthenticationFailedException;
 import io.github.moar0210.assetpulse.identity.AuthenticationUnavailableException;
+import io.github.moar0210.assetpulse.telemetry.InvalidSensorReferenceException;
+import io.github.moar0210.assetpulse.telemetry.TelemetryIdempotencyConflictException;
 import jakarta.servlet.http.HttpServletRequest;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import org.springframework.http.CacheControl;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ProblemDetail;
@@ -15,6 +19,7 @@ import org.springframework.validation.FieldError;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 
 @RestControllerAdvice
 public class ApiExceptionHandler {
@@ -55,6 +60,36 @@ public class ApiExceptionHandler {
                 "Authentication is temporarily unavailable. Try again later.");
     }
 
+    @ExceptionHandler(AssetNotFoundException.class)
+    ResponseEntity<ProblemDetail> assetNotFound(HttpServletRequest request) {
+        return problem(
+                request,
+                HttpStatus.NOT_FOUND,
+                "ASSET_NOT_FOUND",
+                "Asset not found",
+                "The requested asset does not exist or is not accessible.");
+    }
+
+    @ExceptionHandler(InvalidSensorReferenceException.class)
+    ResponseEntity<ProblemDetail> invalidTelemetrySensor(HttpServletRequest request) {
+        return problem(
+                request,
+                HttpStatus.BAD_REQUEST,
+                "INVALID_TELEMETRY_SENSOR",
+                "Invalid telemetry sensor",
+                "One or more sensors do not exist or are not accessible.");
+    }
+
+    @ExceptionHandler(TelemetryIdempotencyConflictException.class)
+    ResponseEntity<ProblemDetail> telemetryIdempotencyConflict(HttpServletRequest request) {
+        return problem(
+                request,
+                HttpStatus.CONFLICT,
+                "IDEMPOTENCY_KEY_REUSED",
+                "Idempotency key already used",
+                "The idempotency key is already associated with another request.");
+    }
+
     @ExceptionHandler(MethodArgumentNotValidException.class)
     ResponseEntity<ProblemDetail> validationFailed(
             MethodArgumentNotValidException exception, HttpServletRequest request) {
@@ -71,6 +106,7 @@ public class ApiExceptionHandler {
         }
         problem.setProperty("fieldErrors", fieldErrors);
         return ResponseEntity.badRequest()
+                .cacheControl(CacheControl.noStore())
                 .contentType(MediaType.APPLICATION_PROBLEM_JSON)
                 .body(problem);
     }
@@ -85,6 +121,16 @@ public class ApiExceptionHandler {
                 "The request body is not valid JSON for this operation.");
     }
 
+    @ExceptionHandler(MethodArgumentTypeMismatchException.class)
+    ResponseEntity<ProblemDetail> invalidPathParameter(HttpServletRequest request) {
+        return problem(
+                request,
+                HttpStatus.BAD_REQUEST,
+                "INVALID_PATH_PARAMETER",
+                "Invalid path parameter",
+                "One or more path parameters are invalid.");
+    }
+
     private ResponseEntity<ProblemDetail> problem(
             HttpServletRequest request,
             HttpStatus status,
@@ -92,6 +138,7 @@ public class ApiExceptionHandler {
             String title,
             String detail) {
         return ResponseEntity.status(status)
+                .cacheControl(CacheControl.noStore())
                 .contentType(MediaType.APPLICATION_PROBLEM_JSON)
                 .body(problemWriter.create(request, status.value(), code, title, detail));
     }

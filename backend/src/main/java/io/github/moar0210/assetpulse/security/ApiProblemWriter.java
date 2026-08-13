@@ -6,6 +6,7 @@ import jakarta.servlet.http.HttpServletResponse;
 import java.io.IOException;
 import java.net.URI;
 import java.util.Locale;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatusCode;
 import org.springframework.http.MediaType;
 import org.springframework.http.ProblemDetail;
@@ -44,6 +45,7 @@ public class ApiProblemWriter {
             String detail)
             throws IOException {
         response.setStatus(status);
+        response.setHeader(HttpHeaders.CACHE_CONTROL, "no-store");
         response.setContentType(MediaType.APPLICATION_PROBLEM_JSON_VALUE);
         response.setCharacterEncoding("UTF-8");
         objectMapper.writeValue(

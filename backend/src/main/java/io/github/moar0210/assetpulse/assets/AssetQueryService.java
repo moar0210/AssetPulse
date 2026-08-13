@@ -17,4 +17,17 @@ public class AssetQueryService {
     public AssetListResponse listForOrganisation(UUID organisationId) {
         return new AssetListResponse(assetRepository.findByOrganisationId(organisationId));
     }
+
+    @Transactional(readOnly = true)
+    public AssetDetailResponse detailForOrganisation(UUID organisationId, UUID assetId) {
+        AssetQueryRepository.AssetRow asset =
+                assetRepository
+                        .findOneByOrganisationIdAndId(organisationId, assetId)
+                        .orElseThrow(AssetNotFoundException::new);
+        return new AssetDetailResponse(
+                asset.id(),
+                asset.assetCode(),
+                asset.name(),
+                assetRepository.findSensorsByOrganisationIdAndAssetId(organisationId, assetId));
+    }
 }

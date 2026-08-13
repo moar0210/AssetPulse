@@ -1,11 +1,13 @@
 package io.github.moar0210.assetpulse.assets;
 
 import io.github.moar0210.assetpulse.identity.AuthenticatedActor;
+import java.util.UUID;
 import org.springframework.http.CacheControl;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
@@ -25,5 +27,13 @@ public class AssetController {
         return ResponseEntity.ok()
                 .cacheControl(CacheControl.noStore())
                 .body(assetQueryService.listForOrganisation(actor.organisationId()));
+    }
+
+    @GetMapping(path = "/{assetId}", produces = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<AssetDetailResponse> detail(
+            @PathVariable UUID assetId, @AuthenticationPrincipal AuthenticatedActor actor) {
+        return ResponseEntity.ok()
+                .cacheControl(CacheControl.noStore())
+                .body(assetQueryService.detailForOrganisation(actor.organisationId(), assetId));
     }
 }

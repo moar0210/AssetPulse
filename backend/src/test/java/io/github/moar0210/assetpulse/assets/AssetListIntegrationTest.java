@@ -54,6 +54,8 @@ class AssetListIntegrationTest {
             UUID.fromString("00000000-0000-0000-0000-000000000001");
     private static final UUID RIVERSIDE_ID =
             UUID.fromString("00000000-0000-0000-0000-000000000002");
+    private static final String NORTHSTAR_ASSET_ID = "20000000-0000-0000-0000-000000000001";
+    private static final String RIVERSIDE_ASSET_ID = "20000000-0000-0000-0000-000000000003";
     private static final ExpectedAsset BOILER_FEED_PUMP =
             new ExpectedAsset(
                     "20000000-0000-0000-0000-000000000001", "PUMP-101", "Boiler Feed Pump");
@@ -235,6 +237,96 @@ class AssetListIntegrationTest {
         }
     }
 
+    @ParameterizedTest
+    @MethodSource("detailAccounts")
+    void everySeededRoleReadsAnExactTenantScopedAssetDetail(
+            String email,
+            String assetId,
+            String assetCode,
+            String assetName,
+            String sensorKey,
+            String ruleCode)
+            throws Exception {
+        mockMvc.perform(
+                        get(ASSETS_PATH + "/" + assetId)
+                                .session(login(email))
+                                .queryParam("organisationId", RIVERSIDE_ID.toString())
+                                .header("X-Organisation-ID", RIVERSIDE_ID.toString())
+                                .accept(MediaType.APPLICATION_JSON))
+                .andExpect(status().isOk())
+                .andExpect(header().string("Cache-Control", "no-store"))
+                .andExpect(jsonPath("$.id").value(assetId))
+                .andExpect(jsonPath("$.assetCode").value(assetCode))
+                .andExpect(jsonPath("$.name").value(assetName))
+                .andExpect(jsonPath("$.sensors.length()").value(1))
+                .andExpect(jsonPath("$.sensors[0].sensorKey").value(sensorKey))
+                .andExpect(jsonPath("$.sensors[0].measurementType").value("TEMPERATURE"))
+                .andExpect(jsonPath("$.sensors[0].unit").value("CELSIUS"))
+                .andExpect(jsonPath("$.sensors[0].thresholdRules.length()").value(1))
+                .andExpect(jsonPath("$.sensors[0].thresholdRules[0].ruleCode").value(ruleCode))
+                .andExpect(
+                        jsonPath("$.sensors[0].thresholdRules[0].comparison")
+                                .value("GREATER_THAN_OR_EQUAL_TO"))
+                .andExpect(jsonPath("$.sensors[0].thresholdRules[0].enabled").value(true))
+                .andExpect(content().string(not(containsString("organisationId"))));
+    }
+
+    @Test
+    void missingAndForeignAssetIdsReturnTheSameNonLeakingProblem() throws Exception {
+        MockHttpSession session = login("admin@northstar.example");
+
+        for (String assetId : List.of(RIVERSIDE_ASSET_ID, "99999999-0000-0000-0000-000000000001")) {
+            mockMvc.perform(
+                            get(ASSETS_PATH + "/" + assetId)
+                                    .session(session)
+                                    .accept(MediaType.APPLICATION_JSON))
+                    .andExpect(status().isNotFound())
+                    .andExpect(header().string("Cache-Control", "no-store"))
+                    .andExpect(
+                            content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
+                    .andExpect(jsonPath("$.code").value("ASSET_NOT_FOUND"))
+                    .andExpect(
+                            jsonPath("$.detail")
+                                    .value(
+                                            "The requested asset does not exist or is not accessible."))
+                    .andExpect(content().string(not(containsString("Riverside"))))
+                    .andExpect(content().string(not(containsString("Process Pump"))));
+        }
+    }
+
+    @Test
+    void malformedAssetIdReturnsATypedNonReflectingProblem() throws Exception {
+        mockMvc.perform(
+                        get(ASSETS_PATH + "/not-a-uuid")
+                                .session(login("viewer@northstar.example"))
+                                .accept(MediaType.APPLICATION_JSON))
+                .andExpect(status().isBadRequest())
+                .andExpect(header().string("Cache-Control", "no-store"))
+                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
+                .andExpect(jsonPath("$.code").value("INVALID_PATH_PARAMETER"))
+                .andExpect(jsonPath("$.title").value("Invalid path parameter"))
+                .andExpect(jsonPath("$.detail").value("One or more path parameters are invalid."));
+    }
+
+    @Test
+    void assetDetailMutationRoutesRemainAbsent() throws Exception {
+        MockHttpSession session = login("admin@northstar.example");
+        CsrfExchange csrf = csrf(session);
+        for (MockHttpServletRequestBuilder mutation :
+                List.of(
+                        post(ASSETS_PATH + "/" + NORTHSTAR_ASSET_ID),
+                        put(ASSETS_PATH + "/" + NORTHSTAR_ASSET_ID),
+                        patch(ASSETS_PATH + "/" + NORTHSTAR_ASSET_ID),
+                        delete(ASSETS_PATH + "/" + NORTHSTAR_ASSET_ID))) {
+            mockMvc.perform(
+                            mutation.session(session)
+                                    .header(csrf.headerName(), csrf.token())
+                                    .contentType(MediaType.APPLICATION_JSON)
+                                    .content("{}"))
+                    .andExpect(status().isMethodNotAllowed());
+        }
+    }
+
     private JsonNode listAssets(MockHttpSession session) throws Exception {
         MvcResult result =
                 mockMvc.perform(
@@ -362,6 +454,38 @@ class AssetListIntegrationTest {
                         NORTHSTAR_ID,
                         List.of(PROCESS_PUMP),
                         List.of(BOILER_FEED_PUMP, COOLING_WATER_PUMP)));
+    }
+
+    private static Stream<Arguments> detailAccounts() {
+        return Stream.of(
+                Arguments.of(
+                        "admin@northstar.example",
+                        NORTHSTAR_ASSET_ID,
+                        "PUMP-101",
+                        "Boiler Feed Pump",
+                        "PUMP-101-TEMP",
+                        "PUMP-101-HIGH-TEMP"),
+                Arguments.of(
+                        "technician@northstar.example",
+                        NORTHSTAR_ASSET_ID,
+                        "PUMP-101",
+                        "Boiler Feed Pump",
+                        "PUMP-101-TEMP",
+                        "PUMP-101-HIGH-TEMP"),
+                Arguments.of(
+                        "viewer@northstar.example",
+                        NORTHSTAR_ASSET_ID,
+                        "PUMP-101",
+                        "Boiler Feed Pump",
+                        "PUMP-101-TEMP",
+                        "PUMP-101-HIGH-TEMP"),
+                Arguments.of(
+                        "admin@riverside.example",
+                        RIVERSIDE_ASSET_ID,
+                        "PUMP-201",
+                        "Process Pump",
+                        "PUMP-201-TEMP",
+                        "PUMP-201-HIGH-TEMP"));
     }
 
     private record CsrfExchange(MockHttpSession session, String headerName, String token) {}
