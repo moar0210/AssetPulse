@@ -42,6 +42,30 @@ const assets = [
   },
 ] as const;
 
+const assetDetail = {
+  ...assets[0],
+  sensors: [
+    {
+      id: "30000000-0000-0000-0000-000000000001",
+      sensorKey: "PUMP-101-TEMP",
+      name: "Pump casing temperature",
+      measurementType: "TEMPERATURE",
+      unit: "CELSIUS",
+      thresholdRules: [
+        {
+          id: "40000000-0000-0000-0000-000000000001",
+          ruleCode: "PUMP-101-HIGH-TEMP",
+          name: "High temperature",
+          comparison: "GREATER_THAN_OR_EQUAL_TO",
+          thresholdValue: 95,
+          cooldownSeconds: 300,
+          enabled: true,
+        },
+      ],
+    },
+  ],
+} as const;
+
 function jsonResponse(payload: unknown, status = 200) {
   return new Response(JSON.stringify(payload), {
     status,
@@ -214,6 +238,227 @@ describe("seeded session application", () => {
 
     expect(await screen.findByText("Boiler Feed Pump")).toBeInTheDocument();
     expect(assetRequests).toBe(2);
+  });
+
+  it("opens exact read-only sensor and threshold configuration and navigates back", async () => {
+    installFetch(async (url) => {
+      if (url === "/api/v1/status") {
+        return statusResponse();
+      }
+      if (url === "/api/v1/session/csrf") {
+        return jsonResponse(csrfToken);
+      }
+      if (url === `/api/v1/assets/${assetDetail.id}`) {
+        return jsonResponse(assetDetail);
+      }
+      return jsonResponse(identity);
+    });
+
+    render(<App />);
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "View details for Boiler Feed Pump (PUMP-101)",
+      }),
+    );
+
+    expect(
+      await screen.findByRole("heading", { name: "Boiler Feed Pump" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Read-only")).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "Sensor configuration" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "Pump casing temperature" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("PUMP-101-TEMP")).toBeInTheDocument();
+    expect(screen.getByText("Celsius (°C)")).toBeInTheDocument();
+    expect(screen.getByText("High temperature")).toBeInTheDocument();
+    expect(screen.getByText(/At or above/)).toHaveTextContent("95 °C");
+    expect(screen.getByText("300 seconds")).toBeInTheDocument();
+    expect(screen.getByText("Enabled")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Sign out" })).toBeEnabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Back to assets" }));
+
+    expect(
+      await screen.findByRole("heading", { name: "Assets" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", {
+        name: "View details for Boiler Feed Pump (PUMP-101)",
+      }),
+    ).toBeEnabled();
+    expect(screen.queryByText("PUMP-101-TEMP")).toBeNull();
+  });
+
+  it("shows asset-detail loading while preserving trusted session controls", async () => {
+    installFetch(async (url) => {
+      if (url === "/api/v1/status") {
+        return statusResponse();
+      }
+      if (url === "/api/v1/session/csrf") {
+        return jsonResponse(csrfToken);
+      }
+      if (url === `/api/v1/assets/${assetDetail.id}`) {
+        return new Promise<Response>(() => {});
+      }
+      return jsonResponse(identity);
+    });
+
+    render(<App />);
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "View details for Boiler Feed Pump (PUMP-101)",
+      }),
+    );
+
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      "Loading asset details",
+    );
+    expect(screen.getByText("Northstar Operations")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Sign out" })).toBeEnabled();
+    expect(
+      screen.getByRole("button", { name: "Back to assets" }),
+    ).toBeEnabled();
+  });
+
+  it("retries an unavailable asset detail without discarding identity", async () => {
+    let detailRequests = 0;
+    installFetch(async (url) => {
+      if (url === "/api/v1/status") {
+        return statusResponse();
+      }
+      if (url === "/api/v1/session/csrf") {
+        return jsonResponse(csrfToken);
+      }
+      if (url === `/api/v1/assets/${assetDetail.id}`) {
+        detailRequests += 1;
+        return detailRequests === 1
+          ? jsonResponse({}, 503)
+          : jsonResponse(assetDetail);
+      }
+      return jsonResponse(identity);
+    });
+
+    render(<App />);
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "View details for Boiler Feed Pump (PUMP-101)",
+      }),
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "could not load this asset",
+    );
+    expect(screen.getByText("Northstar Operations")).toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Retry asset details" }),
+    );
+
+    expect(
+      await screen.findByRole("heading", { name: "Boiler Feed Pump" }),
+    ).toBeInTheDocument();
+    expect(detailRequests).toBe(2);
+  });
+
+  it("renders a generic non-leaking asset not-found state", async () => {
+    installFetch(async (url) => {
+      if (url === "/api/v1/status") {
+        return statusResponse();
+      }
+      if (url === "/api/v1/session/csrf") {
+        return jsonResponse(csrfToken);
+      }
+      if (url === `/api/v1/assets/${assetDetail.id}`) {
+        return jsonResponse(
+          {
+            code: "ASSET_NOT_FOUND",
+            detail: "Foreign compressor belongs to Riverside",
+          },
+          404,
+        );
+      }
+      return jsonResponse(identity);
+    });
+
+    render(<App />);
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "View details for Boiler Feed Pump (PUMP-101)",
+      }),
+    );
+
+    expect(
+      await screen.findByRole("heading", { name: "Asset not found" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "requested asset is not available",
+    );
+    expect(screen.queryByText(/Foreign compressor|Riverside/)).toBeNull();
+    expect(screen.queryByText("PUMP-101")).toBeNull();
+    expect(screen.getByRole("button", { name: "Sign out" })).toBeEnabled();
+  });
+
+  it("rediscovers the session and clears identity after an asset-list 401", async () => {
+    let sessionReads = 0;
+    installFetch(
+      async (url) => {
+        if (url === "/api/v1/status") {
+          return statusResponse();
+        }
+        if (url === "/api/v1/session/csrf") {
+          return jsonResponse(csrfToken);
+        }
+        sessionReads += 1;
+        return sessionReads === 1
+          ? jsonResponse(identity)
+          : jsonResponse({}, 401);
+      },
+      async () => jsonResponse({}, 401),
+    );
+
+    render(<App />);
+
+    expect(
+      await screen.findByRole("button", { name: "Sign in" }),
+    ).toBeEnabled();
+    expect(screen.queryByText("Welcome, Nora Admin")).toBeNull();
+    expect(screen.queryByText("Northstar Operations")).toBeNull();
+    expect(sessionReads).toBe(2);
+  });
+
+  it("rediscovers the session and clears detail after an asset-detail 401", async () => {
+    let sessionReads = 0;
+    installFetch(async (url) => {
+      if (url === "/api/v1/status") {
+        return statusResponse();
+      }
+      if (url === "/api/v1/session/csrf") {
+        return jsonResponse(csrfToken);
+      }
+      if (url === `/api/v1/assets/${assetDetail.id}`) {
+        return jsonResponse({}, 401);
+      }
+      sessionReads += 1;
+      return sessionReads === 1
+        ? jsonResponse(identity)
+        : jsonResponse({}, 401);
+    });
+
+    render(<App />);
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "View details for Boiler Feed Pump (PUMP-101)",
+      }),
+    );
+
+    expect(
+      await screen.findByRole("button", { name: "Sign in" }),
+    ).toBeEnabled();
+    expect(screen.queryByText("Welcome, Nora Admin")).toBeNull();
+    expect(screen.queryByText("PUMP-101")).toBeNull();
+    expect(sessionReads).toBe(2);
   });
 
   it("signs in with only credentials and refreshes the CSRF token", async () => {

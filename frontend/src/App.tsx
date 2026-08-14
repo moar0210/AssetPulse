@@ -1,8 +1,19 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { FormEvent } from "react";
 
-import { getAssets } from "./api/assets";
-import type { AssetSummary } from "./api/assets";
+import {
+  AssetNotFoundError,
+  AssetSessionExpiredError,
+  getAssetDetail,
+  getAssets,
+} from "./api/assets";
+import type {
+  AssetDetail,
+  AssetSummary,
+  MeasurementType,
+  MeasurementUnit,
+  ThresholdComparison,
+} from "./api/assets";
 import {
   AuthenticationFailedError,
   getCsrfToken,
@@ -32,6 +43,12 @@ type LogoutOutcome = "logged-out" | "unavailable";
 type AssetListState =
   | Readonly<{ kind: "loading" }>
   | Readonly<{ kind: "ready"; assets: readonly AssetSummary[] }>
+  | Readonly<{ kind: "unavailable" }>;
+
+type AssetDetailState =
+  | Readonly<{ kind: "loading" }>
+  | Readonly<{ kind: "ready"; asset: AssetDetail }>
+  | Readonly<{ kind: "not-found" }>
   | Readonly<{ kind: "unavailable" }>;
 
 const API_TIMEOUT_MS = 5_000;
@@ -124,6 +141,18 @@ const statusLabels: Record<ApiConnectionState, string> = {
   checking: "checking",
   available: "available",
   unavailable: "unavailable",
+};
+
+const measurementTypeLabels: Record<MeasurementType, string> = {
+  TEMPERATURE: "Temperature",
+};
+
+const measurementUnitLabels: Record<MeasurementUnit, string> = {
+  CELSIUS: "Celsius (°C)",
+};
+
+const comparisonLabels: Record<ThresholdComparison, string> = {
+  GREATER_THAN_OR_EQUAL_TO: "At or above",
 };
 
 const seededAccounts = [
@@ -284,12 +313,226 @@ function LoginPanel({
   );
 }
 
+function AssetDetailPanel({
+  assetId,
+  onBack,
+  onSessionExpired,
+}: Readonly<{
+  assetId: string;
+  onBack: () => void;
+  onSessionExpired: () => void;
+}>) {
+  const [detailState, setDetailState] = useState<AssetDetailState>({
+    kind: "loading",
+  });
+  const [loadAttempt, setLoadAttempt] = useState(0);
+
+  useEffect(() => {
+    let active = true;
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(
+      () => controller.abort(),
+      API_TIMEOUT_MS,
+    );
+
+    setDetailState({ kind: "loading" });
+
+    void getAssetDetail(assetId, controller.signal)
+      .then((asset) => {
+        if (active && !controller.signal.aborted) {
+          setDetailState({ kind: "ready", asset });
+        }
+      })
+      .catch((error: unknown) => {
+        if (!active) {
+          return;
+        }
+
+        if (error instanceof AssetSessionExpiredError) {
+          onSessionExpired();
+          return;
+        }
+
+        setDetailState(
+          error instanceof AssetNotFoundError
+            ? { kind: "not-found" }
+            : { kind: "unavailable" },
+        );
+      })
+      .finally(() => window.clearTimeout(timeoutId));
+
+    return () => {
+      active = false;
+      window.clearTimeout(timeoutId);
+      controller.abort();
+    };
+  }, [assetId, loadAttempt, onSessionExpired]);
+
+  return (
+    <section
+      className="asset-section asset-detail"
+      aria-labelledby="asset-detail-title"
+    >
+      <button
+        className="secondary-button secondary-button--compact asset-back"
+        type="button"
+        onClick={onBack}
+      >
+        Back to assets
+      </button>
+
+      {detailState.kind === "loading" && (
+        <div className="asset-detail__state">
+          <p className="eyebrow">Protected inventory</p>
+          <h2 id="asset-detail-title">Asset details</h2>
+          <p className="asset-message" role="status">
+            Loading asset details…
+          </p>
+        </div>
+      )}
+
+      {detailState.kind === "unavailable" && (
+        <div className="asset-detail__state">
+          <p className="eyebrow">Protected inventory</p>
+          <h2 id="asset-detail-title">Asset details unavailable</h2>
+          <p className="asset-message form-message--error" role="alert">
+            We could not load this asset. Try again.
+          </p>
+          <button
+            className="secondary-button secondary-button--compact"
+            type="button"
+            onClick={() => setLoadAttempt((attempt) => attempt + 1)}
+          >
+            Retry asset details
+          </button>
+        </div>
+      )}
+
+      {detailState.kind === "not-found" && (
+        <div className="asset-detail__state">
+          <p className="eyebrow">Protected inventory</p>
+          <h2 id="asset-detail-title">Asset not found</h2>
+          <p className="asset-message" role="status">
+            The requested asset is not available.
+          </p>
+        </div>
+      )}
+
+      {detailState.kind === "ready" && (
+        <div className="asset-detail__content">
+          <header className="asset-detail__header">
+            <div>
+              <p className="eyebrow">Protected inventory</p>
+              <h2 id="asset-detail-title">{detailState.asset.name}</h2>
+              <code>{detailState.asset.assetCode}</code>
+            </div>
+            <p className="readonly-badge">Read-only</p>
+          </header>
+
+          <section
+            className="sensor-section"
+            aria-labelledby="sensor-configuration-title"
+          >
+            <div className="configuration-heading">
+              <h3 id="sensor-configuration-title">Sensor configuration</h3>
+              <p aria-label="Sensor count">
+                {detailState.asset.sensors.length}
+              </p>
+            </div>
+
+            {detailState.asset.sensors.length === 0 && (
+              <p className="asset-message">No sensors are configured.</p>
+            )}
+
+            {detailState.asset.sensors.length > 0 && (
+              <div className="sensor-list">
+                {detailState.asset.sensors.map((sensor) => (
+                  <article
+                    className="sensor-card"
+                    key={sensor.id}
+                    aria-labelledby={`sensor-${sensor.id}`}
+                  >
+                    <h4 id={`sensor-${sensor.id}`}>{sensor.name}</h4>
+                    <dl className="configuration-list">
+                      <div>
+                        <dt>Sensor key</dt>
+                        <dd>
+                          <code>{sensor.sensorKey}</code>
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>Measurement</dt>
+                        <dd>{measurementTypeLabels[sensor.measurementType]}</dd>
+                      </div>
+                      <div>
+                        <dt>Unit</dt>
+                        <dd>{measurementUnitLabels[sensor.unit]}</dd>
+                      </div>
+                    </dl>
+
+                    <section
+                      className="rule-section"
+                      aria-labelledby={`rules-${sensor.id}`}
+                    >
+                      <h5 id={`rules-${sensor.id}`}>Threshold rules</h5>
+                      {sensor.thresholdRules.length === 0 && (
+                        <p className="asset-message">
+                          No threshold rules are configured.
+                        </p>
+                      )}
+                      {sensor.thresholdRules.length > 0 && (
+                        <ul className="rule-list">
+                          {sensor.thresholdRules.map((rule) => (
+                            <li key={rule.id}>
+                              <div className="rule-heading">
+                                <strong>{rule.name}</strong>
+                                <code>{rule.ruleCode}</code>
+                              </div>
+                              <dl className="configuration-list configuration-list--rule">
+                                <div>
+                                  <dt>Condition</dt>
+                                  <dd>
+                                    {comparisonLabels[rule.comparison]}{" "}
+                                    <data value={String(rule.thresholdValue)}>
+                                      {rule.thresholdValue} °C
+                                    </data>
+                                  </dd>
+                                </div>
+                                <div>
+                                  <dt>Cooldown</dt>
+                                  <dd>{rule.cooldownSeconds} seconds</dd>
+                                </div>
+                                <div>
+                                  <dt>Status</dt>
+                                  <dd>
+                                    {rule.enabled ? "Enabled" : "Disabled"}
+                                  </dd>
+                                </div>
+                              </dl>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </section>
+                  </article>
+                ))}
+              </div>
+            )}
+          </section>
+        </div>
+      )}
+    </section>
+  );
+}
+
 function AuthenticatedPanel({
   identity,
   onLogout,
+  onSessionExpired,
 }: Readonly<{
   identity: SessionIdentity;
   onLogout: () => Promise<LogoutOutcome>;
+  onSessionExpired: () => void;
 }>) {
   const [logoutState, setLogoutState] = useState<
     "idle" | "submitting" | "error"
@@ -298,6 +541,7 @@ function AuthenticatedPanel({
     kind: "loading",
   });
   const [assetLoadAttempt, setAssetLoadAttempt] = useState(0);
+  const [selectedAssetId, setSelectedAssetId] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -315,10 +559,17 @@ function AuthenticatedPanel({
           setAssetState({ kind: "ready", assets });
         }
       })
-      .catch(() => {
-        if (active) {
-          setAssetState({ kind: "unavailable" });
+      .catch((error: unknown) => {
+        if (!active) {
+          return;
         }
+
+        if (error instanceof AssetSessionExpiredError) {
+          onSessionExpired();
+          return;
+        }
+
+        setAssetState({ kind: "unavailable" });
       })
       .finally(() => window.clearTimeout(timeoutId));
 
@@ -327,7 +578,7 @@ function AuthenticatedPanel({
       window.clearTimeout(timeoutId);
       controller.abort();
     };
-  }, [assetLoadAttempt]);
+  }, [assetLoadAttempt, onSessionExpired]);
 
   async function handleLogout() {
     if (logoutState === "submitting") {
@@ -371,55 +622,73 @@ function AuthenticatedPanel({
 
       <p className="session-ready">Your trusted session is ready.</p>
 
-      <section className="asset-section" aria-labelledby="assets-title">
-        <div className="asset-section__heading">
-          <div>
-            <p className="eyebrow">Protected inventory</p>
-            <h2 id="assets-title">Assets</h2>
+      {selectedAssetId === null ? (
+        <section className="asset-section" aria-labelledby="assets-title">
+          <div className="asset-section__heading">
+            <div>
+              <p className="eyebrow">Protected inventory</p>
+              <h2 id="assets-title">Assets</h2>
+            </div>
+            {assetState.kind === "ready" && (
+              <p className="asset-count" aria-label="Asset count">
+                {assetState.assets.length}
+              </p>
+            )}
           </div>
-          {assetState.kind === "ready" && (
-            <p className="asset-count" aria-label="Asset count">
-              {assetState.assets.length}
+
+          {assetState.kind === "loading" && (
+            <p className="asset-message" role="status" aria-live="polite">
+              Loading assets…
             </p>
           )}
-        </div>
 
-        {assetState.kind === "loading" && (
-          <p className="asset-message" role="status" aria-live="polite">
-            Loading assets…
-          </p>
-        )}
+          {assetState.kind === "ready" && assetState.assets.length === 0 && (
+            <p className="asset-message">No assets are available.</p>
+          )}
 
-        {assetState.kind === "ready" && assetState.assets.length === 0 && (
-          <p className="asset-message">No assets are available.</p>
-        )}
+          {assetState.kind === "ready" && assetState.assets.length > 0 && (
+            <ul className="asset-list">
+              {assetState.assets.map((asset) => (
+                <li key={asset.id}>
+                  <button
+                    className="asset-row-button"
+                    type="button"
+                    aria-label={`View details for ${asset.name} (${asset.assetCode})`}
+                    onClick={() => setSelectedAssetId(asset.id)}
+                  >
+                    <span className="asset-name">{asset.name}</span>
+                    <span className="asset-row-button__meta">
+                      <code>{asset.assetCode}</code>
+                      <span aria-hidden="true">→</span>
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
 
-        {assetState.kind === "ready" && assetState.assets.length > 0 && (
-          <ul className="asset-list">
-            {assetState.assets.map((asset) => (
-              <li key={asset.id}>
-                <span className="asset-name">{asset.name}</span>
-                <code>{asset.assetCode}</code>
-              </li>
-            ))}
-          </ul>
-        )}
-
-        {assetState.kind === "unavailable" && (
-          <div className="asset-unavailable">
-            <p className="asset-message form-message--error" role="alert">
-              We could not load assets. Try again.
-            </p>
-            <button
-              className="secondary-button secondary-button--compact"
-              type="button"
-              onClick={() => setAssetLoadAttempt((attempt) => attempt + 1)}
-            >
-              Retry assets
-            </button>
-          </div>
-        )}
-      </section>
+          {assetState.kind === "unavailable" && (
+            <div className="asset-unavailable">
+              <p className="asset-message form-message--error" role="alert">
+                We could not load assets. Try again.
+              </p>
+              <button
+                className="secondary-button secondary-button--compact"
+                type="button"
+                onClick={() => setAssetLoadAttempt((attempt) => attempt + 1)}
+              >
+                Retry assets
+              </button>
+            </div>
+          )}
+        </section>
+      ) : (
+        <AssetDetailPanel
+          assetId={selectedAssetId}
+          onBack={() => setSelectedAssetId(null)}
+          onSessionExpired={onSessionExpired}
+        />
+      )}
 
       {logoutState === "error" && (
         <p className="form-message form-message--error" role="alert">
@@ -485,6 +754,12 @@ function App() {
     kind: "loading",
   });
   const [bootstrapAttempt, setBootstrapAttempt] = useState(0);
+
+  const handleSessionExpired = useCallback(() => {
+    setApplicationState({ kind: "loading" });
+    setApiState("checking");
+    setBootstrapAttempt((attempt) => attempt + 1);
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -612,6 +887,7 @@ function App() {
       <AuthenticatedPanel
         identity={applicationState.identity}
         onLogout={() => handleLogout(applicationState.csrfToken)}
+        onSessionExpired={handleSessionExpired}
       />
     );
   }

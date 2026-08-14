@@ -357,16 +357,25 @@ code {
   list-style: none;
 }
 
-.asset-list li {
+.asset-row-button {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  width: 100%;
   min-width: 0;
   gap: 1rem;
   padding: 0.9rem 1rem;
   border: 1px solid rgb(157 221 199 / 12%);
   border-radius: 0.7rem;
+  color: inherit;
   background: rgb(7 24 20 / 72%);
+  text-align: left;
+  cursor: pointer;
+}
+
+.asset-row-button:hover {
+  border-color: rgb(117 216 182 / 42%);
+  background: rgb(16 48 39 / 82%);
 }
 
 .asset-name {
@@ -376,7 +385,15 @@ code {
   overflow-wrap: anywhere;
 }
 
-.asset-list code {
+.asset-row-button__meta {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 0.75rem;
+  color: #75d8b6;
+}
+
+.asset-row-button code {
   flex: 0 0 auto;
   font-size: 0.82rem;
 }
@@ -391,6 +408,176 @@ code {
   min-width: 0;
   min-height: 2.5rem;
   padding: 0.55rem 0.9rem;
+}
+
+.asset-back {
+  margin-bottom: 1.5rem;
+}
+
+.asset-detail__state,
+.asset-detail__content,
+.sensor-section,
+.sensor-list,
+.rule-section {
+  display: grid;
+  gap: 1rem;
+}
+
+.asset-detail__state .eyebrow,
+.asset-detail__state h2,
+.asset-detail__state .asset-message,
+.asset-detail__header .eyebrow {
+  margin: 0;
+}
+
+.asset-detail__header {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.asset-detail__header h2 {
+  margin-bottom: 0.45rem;
+}
+
+.readonly-badge {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 0.4rem 0.65rem;
+  border: 1px solid rgb(211 167 74 / 35%);
+  border-radius: 999px;
+  color: #d9bd7d;
+  background: rgb(211 167 74 / 8%);
+  font-size: 0.75rem;
+  font-weight: 750;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.sensor-section {
+  margin-top: 0.5rem;
+  padding-top: 1.25rem;
+  border-top: 1px solid rgb(157 221 199 / 13%);
+}
+
+.configuration-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.configuration-heading h3,
+.sensor-card h4,
+.rule-section h5 {
+  margin: 0;
+  color: #eaf2ef;
+}
+
+.configuration-heading h3 {
+  font-size: 1.1rem;
+}
+
+.configuration-heading p {
+  display: grid;
+  min-width: 1.8rem;
+  min-height: 1.8rem;
+  margin: 0;
+  place-items: center;
+  border-radius: 999px;
+  color: #9ce5cc;
+  background: rgb(117 216 182 / 10%);
+  font-size: 0.8rem;
+  font-weight: 750;
+}
+
+.sensor-card {
+  padding: 1rem;
+  border: 1px solid rgb(157 221 199 / 14%);
+  border-radius: 0.8rem;
+  background: rgb(7 24 20 / 72%);
+}
+
+.sensor-card h4 {
+  margin-bottom: 1rem;
+  font-size: 1rem;
+}
+
+.configuration-list {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.75rem;
+  margin: 0;
+}
+
+.configuration-list > div {
+  min-width: 0;
+}
+
+.configuration-list dt {
+  margin-bottom: 0.3rem;
+  color: #91a39d;
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.configuration-list dd {
+  margin: 0;
+  color: #dfeae6;
+  font-size: 0.88rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.rule-section {
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid rgb(157 221 199 / 11%);
+}
+
+.rule-section h5 {
+  font-size: 0.82rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.rule-list {
+  display: grid;
+  gap: 0.75rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.rule-list li {
+  padding: 0.85rem;
+  border: 1px solid rgb(211 167 74 / 16%);
+  border-radius: 0.65rem;
+  background: rgb(211 167 74 / 4%);
+}
+
+.rule-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.75rem;
+}
+
+.rule-heading strong {
+  color: #eaf2ef;
+  font-size: 0.9rem;
+}
+
+.rule-heading code {
+  font-size: 0.75rem;
+}
+
+.configuration-list--rule {
+  grid-template-columns: minmax(0, 1.5fr) repeat(2, minmax(0, 1fr));
 }
 
 .status-list {
@@ -462,9 +649,23 @@ code {
     width: 100%;
   }
 
-  .asset-list li {
+  .asset-row-button {
     display: grid;
     gap: 0.35rem;
+  }
+
+  .asset-row-button__meta,
+  .rule-heading {
+    justify-content: space-between;
+  }
+
+  .asset-detail__header {
+    display: grid;
+  }
+
+  .configuration-list,
+  .configuration-list--rule {
+    grid-template-columns: 1fr;
   }
 }
 
