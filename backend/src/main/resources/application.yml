@@ -18,3 +18,8 @@ server:
         http-only: true
         same-site: strict
         secure: ${ASSETPULSE_SESSION_COOKIE_SECURE:true}
+
+assetpulse:
+  telemetry:
+    processing:
+      enabled: false

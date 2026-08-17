@@ -38,6 +38,7 @@ class DatabaseMigrationTest {
             assertThat(jdbcClient.sql("SELECT version()").query(String.class).single())
                     .startsWith("PostgreSQL 17.10");
             assertSeedRelationships(jdbcClient);
+            assertProcessingEventLifecycleSchema(jdbcClient);
             assertDatabaseConstraints(jdbcClient);
             firstState = readState(jdbcClient);
             firstSeedRows = readSeedRows(jdbcClient);
@@ -50,7 +51,7 @@ class DatabaseMigrationTest {
             assertThat(readSeedRows(jdbcClient)).containsExactlyElementsOf(firstSeedRows);
         }
 
-        assertThat(firstState).isEqualTo(new DatabaseState("7", 7, 2, 3, 4, 3, 3, 3, 0, 0, 0));
+        assertThat(firstState).isEqualTo(new DatabaseState("8", 8, 2, 3, 4, 3, 3, 3, 0, 0, 0));
         assertThat(firstSeedRows).hasSize(18);
     }
 
@@ -275,6 +276,100 @@ class DatabaseMigrationTest {
                 .isOne();
     }
 
+    private void assertProcessingEventLifecycleSchema(JdbcClient jdbcClient) {
+        assertThat(
+                        jdbcClient
+                                .sql(
+                                        """
+                                        SELECT CONCAT_WS(
+                                            '|',
+                                            column_name,
+                                            data_type,
+                                            COALESCE(character_maximum_length::text, '-'),
+                                            is_nullable,
+                                            (column_default IS NOT NULL)::text
+                                        )
+                                        FROM information_schema.columns
+                                        WHERE table_schema = 'public'
+                                          AND table_name = 'telemetry_processing_event'
+                                          AND column_name IN (
+                                              'status',
+                                              'attempt_count',
+                                              'next_attempt_at',
+                                              'claim_token',
+                                              'claim_owner',
+                                              'lease_expires_at',
+                                              'completed_at',
+                                              'dead_at',
+                                              'last_error_code',
+                                              'last_error_message',
+                                              'updated_at'
+                                          )
+                                        ORDER BY column_name
+                                        """)
+                                .query(String.class)
+                                .list())
+                .containsExactly(
+                        "attempt_count|smallint|-|NO|true",
+                        "claim_owner|character varying|128|YES|false",
+                        "claim_token|uuid|-|YES|false",
+                        "completed_at|timestamp with time zone|-|YES|false",
+                        "dead_at|timestamp with time zone|-|YES|false",
+                        "last_error_code|character varying|64|YES|false",
+                        "last_error_message|character varying|256|YES|false",
+                        "lease_expires_at|timestamp with time zone|-|YES|false",
+                        "next_attempt_at|timestamp with time zone|-|YES|true",
+                        "status|character varying|16|NO|true",
+                        "updated_at|timestamp with time zone|-|NO|true");
+
+        assertThat(
+                        jdbcClient
+                                .sql(
+                                        """
+                                        SELECT indexname
+                                        FROM pg_indexes
+                                        WHERE schemaname = 'public'
+                                          AND tablename = 'telemetry_processing_event'
+                                          AND (
+                                              (
+                                                  indexname = 'ix_telemetry_processing_event_due_work'
+                                                  AND indexdef LIKE '%(next_attempt_at, created_at, id)%'
+                                                  AND indexdef LIKE '%WHERE%PENDING%'
+                                              )
+                                              OR (
+                                                  indexname = 'ix_telemetry_processing_event_expired_lease'
+                                                  AND indexdef LIKE '%(lease_expires_at, created_at, id)%'
+                                                  AND indexdef LIKE '%WHERE%PROCESSING%'
+                                              )
+                                          )
+                                        ORDER BY indexname
+                                        """)
+                                .query(String.class)
+                                .list())
+                .containsExactly(
+                        "ix_telemetry_processing_event_due_work",
+                        "ix_telemetry_processing_event_expired_lease");
+
+        assertThat(
+                        jdbcClient
+                                .sql(
+                                        """
+                                        SELECT conname
+                                        FROM pg_constraint
+                                        WHERE conrelid = 'telemetry_processing_event'::regclass
+                                          AND conname LIKE 'ck_telemetry_processing_event_%'
+                                        ORDER BY conname
+                                        """)
+                                .query(String.class)
+                                .list())
+                .contains(
+                        "ck_telemetry_processing_event_attempt_count",
+                        "ck_telemetry_processing_event_claim_owner",
+                        "ck_telemetry_processing_event_error_fields",
+                        "ck_telemetry_processing_event_state_consistency",
+                        "ck_telemetry_processing_event_status");
+    }
+
     private void assertDatabaseConstraints(JdbcClient jdbcClient) {
         assertThatThrownBy(
                         () ->
@@ -316,6 +411,107 @@ class DatabaseMigrationTest {
                             1,
                             '2026-08-13 12:00:00+00'
                         )
+                        """)
+                .update();
+
+        jdbcClient
+                .sql(
+                        """
+                        INSERT INTO telemetry_processing_event (
+                            id,
+                            organisation_id,
+                            telemetry_batch_id,
+                            event_type,
+                            created_at
+                        )
+                        VALUES (
+                            '70000000-0000-0000-0000-000000000001',
+                            '00000000-0000-0000-0000-000000000001',
+                            '50000000-0000-0000-0000-000000000001',
+                            'TELEMETRY_BATCH_ACCEPTED',
+                            '2026-08-13 12:00:00+00'
+                        )
+                        """)
+                .update();
+
+        assertThat(
+                        count(
+                                jdbcClient,
+                                """
+                                SELECT COUNT(*)::integer
+                                FROM telemetry_processing_event
+                                WHERE id = '70000000-0000-0000-0000-000000000001'
+                                  AND status = 'PENDING'
+                                  AND attempt_count = 0
+                                  AND next_attempt_at IS NOT NULL
+                                  AND updated_at IS NOT NULL
+                                  AND next_attempt_at = updated_at
+                                  AND claim_token IS NULL
+                                  AND claim_owner IS NULL
+                                  AND lease_expires_at IS NULL
+                                  AND completed_at IS NULL
+                                  AND dead_at IS NULL
+                                  AND last_error_code IS NULL
+                                  AND last_error_message IS NULL
+                                """))
+                .isOne();
+
+        assertThatThrownBy(
+                        () ->
+                                jdbcClient
+                                        .sql(
+                                                """
+                                                UPDATE telemetry_processing_event
+                                                SET status = 'UNKNOWN'
+                                                WHERE id = '70000000-0000-0000-0000-000000000001'
+                                                """)
+                                        .update())
+                .isInstanceOf(DataIntegrityViolationException.class);
+
+        assertThatThrownBy(
+                        () ->
+                                jdbcClient
+                                        .sql(
+                                                """
+                                                UPDATE telemetry_processing_event
+                                                SET attempt_count = 6
+                                                WHERE id = '70000000-0000-0000-0000-000000000001'
+                                                """)
+                                        .update())
+                .isInstanceOf(DataIntegrityViolationException.class);
+
+        assertThatThrownBy(
+                        () ->
+                                jdbcClient
+                                        .sql(
+                                                """
+                                                UPDATE telemetry_processing_event
+                                                SET status = 'PROCESSING',
+                                                    attempt_count = 1,
+                                                    next_attempt_at = NULL
+                                                WHERE id = '70000000-0000-0000-0000-000000000001'
+                                                """)
+                                        .update())
+                .isInstanceOf(DataIntegrityViolationException.class);
+
+        assertThatThrownBy(
+                        () ->
+                                jdbcClient
+                                        .sql(
+                                                """
+                                                UPDATE telemetry_processing_event
+                                                SET last_error_code = REPEAT('X', 65),
+                                                    last_error_message = 'Fixed safe message'
+                                                WHERE id = '70000000-0000-0000-0000-000000000001'
+                                                """)
+                                        .update())
+                .isInstanceOf(DataIntegrityViolationException.class);
+
+        jdbcClient
+                .sql(
+                        """
+                        DELETE FROM telemetry_processing_event
+                        WHERE id = '70000000-0000-0000-0000-000000000001'
                         """)
                 .update();
 
