@@ -50,7 +50,7 @@ class DatabaseMigrationTest {
             assertThat(readSeedRows(jdbcClient)).containsExactlyElementsOf(firstSeedRows);
         }
 
-        assertThat(firstState).isEqualTo(new DatabaseState("5", 5, 2, 3, 4, 3, 3, 3, 0, 0));
+        assertThat(firstState).isEqualTo(new DatabaseState("7", 7, 2, 3, 4, 3, 3, 3, 0, 0, 0));
         assertThat(firstSeedRows).hasSize(18);
     }
 
@@ -87,7 +87,8 @@ class DatabaseMigrationTest {
                 count(jdbcClient, "SELECT COUNT(*)::integer FROM sensor"),
                 count(jdbcClient, "SELECT COUNT(*)::integer FROM threshold_rule"),
                 count(jdbcClient, "SELECT COUNT(*)::integer FROM telemetry_batch"),
-                count(jdbcClient, "SELECT COUNT(*)::integer FROM telemetry_reading"));
+                count(jdbcClient, "SELECT COUNT(*)::integer FROM telemetry_reading"),
+                count(jdbcClient, "SELECT COUNT(*)::integer FROM telemetry_processing_event"));
     }
 
     private List<String> readSeedRows(JdbcClient jdbcClient) {
@@ -255,6 +256,19 @@ class DatabaseMigrationTest {
                                         FROM pg_indexes
                                         WHERE schemaname = 'public'
                                           AND indexname = 'ix_asset_organisation_name_id'
+                                        """)
+                                .query(Integer.class)
+                                .single())
+                .isOne();
+
+        assertThat(
+                        jdbcClient
+                                .sql(
+                                        """
+                                        SELECT COUNT(*)::integer
+                                        FROM pg_indexes
+                                        WHERE schemaname = 'public'
+                                          AND indexname = 'ix_telemetry_reading_organisation_sensor_observed_id'
                                         """)
                                 .query(Integer.class)
                                 .single())
@@ -462,5 +476,6 @@ class DatabaseMigrationTest {
             int sensors,
             int thresholdRules,
             int telemetryBatches,
-            int telemetryReadings) {}
+            int telemetryReadings,
+            int telemetryProcessingEvents) {}
 }

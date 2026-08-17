@@ -160,6 +160,10 @@ public class SecurityConfiguration {
                                         .requestMatchers(HttpMethod.GET, "/api/v1/assets/{assetId}")
                                         .hasAnyRole("OPERATIONS_ADMIN", "TECHNICIAN", "VIEWER")
                                         .requestMatchers(
+                                                HttpMethod.GET,
+                                                "/api/v1/sensors/{sensorId}/telemetry-readings")
+                                        .hasAnyRole("OPERATIONS_ADMIN", "TECHNICIAN", "VIEWER")
+                                        .requestMatchers(
                                                 HttpMethod.POST, "/api/v1/telemetry-batches")
                                         .hasRole("OPERATIONS_ADMIN")
                                         .requestMatchers("/api/**")

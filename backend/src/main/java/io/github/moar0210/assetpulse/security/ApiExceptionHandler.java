@@ -5,6 +5,8 @@ import io.github.moar0210.assetpulse.identity.AlreadyAuthenticatedException;
 import io.github.moar0210.assetpulse.identity.AuthenticationFailedException;
 import io.github.moar0210.assetpulse.identity.AuthenticationUnavailableException;
 import io.github.moar0210.assetpulse.telemetry.InvalidSensorReferenceException;
+import io.github.moar0210.assetpulse.telemetry.InvalidTelemetryRangeException;
+import io.github.moar0210.assetpulse.telemetry.SensorNotFoundException;
 import io.github.moar0210.assetpulse.telemetry.TelemetryIdempotencyConflictException;
 import jakarta.servlet.http.HttpServletRequest;
 import java.util.LinkedHashMap;
@@ -68,6 +70,26 @@ public class ApiExceptionHandler {
                 "ASSET_NOT_FOUND",
                 "Asset not found",
                 "The requested asset does not exist or is not accessible.");
+    }
+
+    @ExceptionHandler(SensorNotFoundException.class)
+    ResponseEntity<ProblemDetail> sensorNotFound(HttpServletRequest request) {
+        return problem(
+                request,
+                HttpStatus.NOT_FOUND,
+                "SENSOR_NOT_FOUND",
+                "Sensor not found",
+                "The requested sensor does not exist or is not accessible.");
+    }
+
+    @ExceptionHandler(InvalidTelemetryRangeException.class)
+    ResponseEntity<ProblemDetail> invalidTelemetryRange(HttpServletRequest request) {
+        return problem(
+                request,
+                HttpStatus.BAD_REQUEST,
+                "INVALID_TELEMETRY_RANGE",
+                "Invalid telemetry range",
+                "Provide a valid telemetry time range and result limit.");
     }
 
     @ExceptionHandler(InvalidSensorReferenceException.class)
