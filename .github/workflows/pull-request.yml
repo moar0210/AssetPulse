@@ -69,6 +69,33 @@ jobs:
       - name: Build production bundle
         run: npm run build
 
+  simulator:
+    name: Simulator
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: simulator
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js 24.14.0
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24.14.0
+          cache: npm
+          cache-dependency-path: simulator/package-lock.json
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Check syntax
+        run: npm run check
+
+      - name: Test public API scenarios
+        run: npm test
+
   containers:
     name: Containers
     runs-on: ubuntu-latest
