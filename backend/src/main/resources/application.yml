@@ -22,4 +22,4 @@ server:
 assetpulse:
   telemetry:
     processing:
-      enabled: false
+      enabled: ${ASSETPULSE_TELEMETRY_PROCESSING_ENABLED:true}

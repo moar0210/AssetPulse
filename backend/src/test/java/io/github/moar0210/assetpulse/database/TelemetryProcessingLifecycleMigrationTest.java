@@ -30,7 +30,7 @@ class TelemetryProcessingLifecycleMigrationTest {
             new PostgreSQLContainer<>(DockerImageName.parse("postgres:17.10-alpine"));
 
     @Test
-    void v8BackfillsExistingProcessingIntentAndRemainsStableAcrossRestart() {
+    void v8BackfillsExistingProcessingIntentAndV9PreservesItAcrossRestart() {
         DriverManagerDataSource dataSource =
                 new DriverManagerDataSource(
                         POSTGRESQL.getJdbcUrl(),
@@ -69,6 +69,24 @@ class TelemetryProcessingLifecycleMigrationTest {
                                 .query(Integer.class)
                                 .single())
                 .isOne();
+        assertThat(
+                        jdbcClient
+                                .sql(
+                                        """
+                                        SELECT COUNT(*)::integer
+                                        FROM flyway_schema_history
+                                        WHERE success
+                                          AND version = '9'
+                                        """)
+                                .query(Integer.class)
+                                .single())
+                .isOne();
+        assertThat(
+                        jdbcClient
+                                .sql("SELECT COUNT(*)::integer FROM alert")
+                                .query(Integer.class)
+                                .single())
+                .isZero();
 
         Flyway.configure().dataSource(dataSource).load().migrate();
 

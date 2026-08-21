@@ -39,6 +39,7 @@ class DatabaseMigrationTest {
                     .startsWith("PostgreSQL 17.10");
             assertSeedRelationships(jdbcClient);
             assertProcessingEventLifecycleSchema(jdbcClient);
+            assertAlertSchema(jdbcClient);
             assertDatabaseConstraints(jdbcClient);
             firstState = readState(jdbcClient);
             firstSeedRows = readSeedRows(jdbcClient);
@@ -51,7 +52,7 @@ class DatabaseMigrationTest {
             assertThat(readSeedRows(jdbcClient)).containsExactlyElementsOf(firstSeedRows);
         }
 
-        assertThat(firstState).isEqualTo(new DatabaseState("8", 8, 2, 3, 4, 3, 3, 3, 0, 0, 0));
+        assertThat(firstState).isEqualTo(new DatabaseState("9", 9, 2, 3, 4, 3, 3, 3, 0, 0, 0, 0));
         assertThat(firstSeedRows).hasSize(18);
     }
 
@@ -89,7 +90,8 @@ class DatabaseMigrationTest {
                 count(jdbcClient, "SELECT COUNT(*)::integer FROM threshold_rule"),
                 count(jdbcClient, "SELECT COUNT(*)::integer FROM telemetry_batch"),
                 count(jdbcClient, "SELECT COUNT(*)::integer FROM telemetry_reading"),
-                count(jdbcClient, "SELECT COUNT(*)::integer FROM telemetry_processing_event"));
+                count(jdbcClient, "SELECT COUNT(*)::integer FROM telemetry_processing_event"),
+                count(jdbcClient, "SELECT COUNT(*)::integer FROM alert"));
     }
 
     private List<String> readSeedRows(JdbcClient jdbcClient) {
@@ -368,6 +370,86 @@ class DatabaseMigrationTest {
                         "ck_telemetry_processing_event_error_fields",
                         "ck_telemetry_processing_event_state_consistency",
                         "ck_telemetry_processing_event_status");
+    }
+
+    private void assertAlertSchema(JdbcClient jdbcClient) {
+        assertThat(
+                        jdbcClient
+                                .sql(
+                                        """
+                                        SELECT CONCAT_WS(
+                                            '|',
+                                            column_name,
+                                            data_type,
+                                            COALESCE(character_maximum_length::text, '-'),
+                                            is_nullable,
+                                            (column_default IS NOT NULL)::text
+                                        )
+                                        FROM information_schema.columns
+                                        WHERE table_schema = 'public'
+                                          AND table_name = 'alert'
+                                        ORDER BY column_name
+                                        """)
+                                .query(String.class)
+                                .list())
+                .containsExactly(
+                        "cooldown_until|timestamp with time zone|-|NO|false",
+                        "created_at|timestamp with time zone|-|NO|false",
+                        "fingerprint|character|64|NO|false",
+                        "first_occurred_at|timestamp with time zone|-|NO|false",
+                        "id|uuid|-|NO|false",
+                        "last_occurred_at|timestamp with time zone|-|NO|false",
+                        "occurrence_count|bigint|-|NO|true",
+                        "organisation_id|uuid|-|NO|false",
+                        "status|character varying|16|NO|true",
+                        "threshold_rule_id|uuid|-|NO|false",
+                        "updated_at|timestamp with time zone|-|NO|false");
+
+        assertThat(
+                        jdbcClient
+                                .sql(
+                                        """
+                                        SELECT indexname
+                                        FROM pg_indexes
+                                        WHERE schemaname = 'public'
+                                          AND tablename = 'alert'
+                                          AND indexname IN (
+                                              'ix_alert_organisation_status_last_occurred_id',
+                                              'uq_alert_organisation_fingerprint',
+                                              'uq_alert_organisation_rule'
+                                          )
+                                        ORDER BY indexname
+                                        """)
+                                .query(String.class)
+                                .list())
+                .containsExactly(
+                        "ix_alert_organisation_status_last_occurred_id",
+                        "uq_alert_organisation_fingerprint",
+                        "uq_alert_organisation_rule");
+
+        assertThat(
+                        jdbcClient
+                                .sql(
+                                        """
+                                        SELECT conname
+                                        FROM pg_constraint
+                                        WHERE conrelid = 'alert'::regclass
+                                        ORDER BY conname
+                                        """)
+                                .query(String.class)
+                                .list())
+                .contains(
+                        "ck_alert_fingerprint",
+                        "ck_alert_occurrence_count",
+                        "ck_alert_occurrence_timestamps",
+                        "ck_alert_record_timestamps",
+                        "ck_alert_status",
+                        "fk_alert_organisation",
+                        "fk_alert_threshold_rule",
+                        "pk_alert",
+                        "uq_alert_organisation_fingerprint",
+                        "uq_alert_organisation_id",
+                        "uq_alert_organisation_rule");
     }
 
     private void assertDatabaseConstraints(JdbcClient jdbcClient) {
@@ -673,5 +755,6 @@ class DatabaseMigrationTest {
             int thresholdRules,
             int telemetryBatches,
             int telemetryReadings,
-            int telemetryProcessingEvents) {}
+            int telemetryProcessingEvents,
+            int alerts) {}
 }
