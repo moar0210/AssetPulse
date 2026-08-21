@@ -23,6 +23,7 @@ import {
 } from "./api/session";
 import type { CsrfToken, LoginRequest, SessionIdentity } from "./api/session";
 import { getApiStatus } from "./api/status";
+import { TelemetryPanel } from "./TelemetryPanel";
 import "./App.css";
 
 type ApiConnectionState = "checking" | "available" | "unavailable";
@@ -519,6 +520,11 @@ function AssetDetailPanel({
               </div>
             )}
           </section>
+
+          <TelemetryPanel
+            sensors={detailState.asset.sensors}
+            onSessionExpired={onSessionExpired}
+          />
         </div>
       )}
     </section>

@@ -1,0 +1,15 @@
+{
+  "name": "assetpulse-simulator",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "engines": {
+    "node": ">=24.0.0 <25"
+  },
+  "scripts": {
+    "check": "node --check src/cli.mjs",
+    "test": "node --test",
+    "normal": "node src/cli.mjs normal",
+    "overheating": "node src/cli.mjs overheating"
+  }
+}

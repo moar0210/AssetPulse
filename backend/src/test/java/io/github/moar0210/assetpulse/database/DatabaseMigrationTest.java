@@ -38,7 +38,10 @@ class DatabaseMigrationTest {
             assertThat(jdbcClient.sql("SELECT version()").query(String.class).single())
                     .startsWith("PostgreSQL 17.10");
             assertSeedRelationships(jdbcClient);
+            assertProcessingEventLifecycleSchema(jdbcClient);
+            assertAlertSchema(jdbcClient);
             assertDatabaseConstraints(jdbcClient);
+            assertAlertHistoryConstraints(jdbcClient);
             firstState = readState(jdbcClient);
             firstSeedRows = readSeedRows(jdbcClient);
         }
@@ -50,7 +53,8 @@ class DatabaseMigrationTest {
             assertThat(readSeedRows(jdbcClient)).containsExactlyElementsOf(firstSeedRows);
         }
 
-        assertThat(firstState).isEqualTo(new DatabaseState("5", 5, 2, 3, 4, 3, 3, 3, 0, 0));
+        assertThat(firstState)
+                .isEqualTo(new DatabaseState("10", 10, 2, 3, 4, 3, 3, 3, 0, 0, 0, 0, 0));
         assertThat(firstSeedRows).hasSize(18);
     }
 
@@ -87,7 +91,10 @@ class DatabaseMigrationTest {
                 count(jdbcClient, "SELECT COUNT(*)::integer FROM sensor"),
                 count(jdbcClient, "SELECT COUNT(*)::integer FROM threshold_rule"),
                 count(jdbcClient, "SELECT COUNT(*)::integer FROM telemetry_batch"),
-                count(jdbcClient, "SELECT COUNT(*)::integer FROM telemetry_reading"));
+                count(jdbcClient, "SELECT COUNT(*)::integer FROM telemetry_reading"),
+                count(jdbcClient, "SELECT COUNT(*)::integer FROM telemetry_processing_event"),
+                count(jdbcClient, "SELECT COUNT(*)::integer FROM alert"),
+                count(jdbcClient, "SELECT COUNT(*)::integer FROM alert_status_history"));
     }
 
     private List<String> readSeedRows(JdbcClient jdbcClient) {
@@ -259,6 +266,445 @@ class DatabaseMigrationTest {
                                 .query(Integer.class)
                                 .single())
                 .isOne();
+
+        assertThat(
+                        jdbcClient
+                                .sql(
+                                        """
+                                        SELECT COUNT(*)::integer
+                                        FROM pg_indexes
+                                        WHERE schemaname = 'public'
+                                          AND indexname = 'ix_telemetry_reading_organisation_sensor_observed_id'
+                                        """)
+                                .query(Integer.class)
+                                .single())
+                .isOne();
+    }
+
+    private void assertProcessingEventLifecycleSchema(JdbcClient jdbcClient) {
+        assertThat(
+                        jdbcClient
+                                .sql(
+                                        """
+                                        SELECT CONCAT_WS(
+                                            '|',
+                                            column_name,
+                                            data_type,
+                                            COALESCE(character_maximum_length::text, '-'),
+                                            is_nullable,
+                                            (column_default IS NOT NULL)::text
+                                        )
+                                        FROM information_schema.columns
+                                        WHERE table_schema = 'public'
+                                          AND table_name = 'telemetry_processing_event'
+                                          AND column_name IN (
+                                              'status',
+                                              'attempt_count',
+                                              'next_attempt_at',
+                                              'claim_token',
+                                              'claim_owner',
+                                              'lease_expires_at',
+                                              'completed_at',
+                                              'dead_at',
+                                              'last_error_code',
+                                              'last_error_message',
+                                              'updated_at'
+                                          )
+                                        ORDER BY column_name
+                                        """)
+                                .query(String.class)
+                                .list())
+                .containsExactly(
+                        "attempt_count|smallint|-|NO|true",
+                        "claim_owner|character varying|128|YES|false",
+                        "claim_token|uuid|-|YES|false",
+                        "completed_at|timestamp with time zone|-|YES|false",
+                        "dead_at|timestamp with time zone|-|YES|false",
+                        "last_error_code|character varying|64|YES|false",
+                        "last_error_message|character varying|256|YES|false",
+                        "lease_expires_at|timestamp with time zone|-|YES|false",
+                        "next_attempt_at|timestamp with time zone|-|YES|true",
+                        "status|character varying|16|NO|true",
+                        "updated_at|timestamp with time zone|-|NO|true");
+
+        assertThat(
+                        jdbcClient
+                                .sql(
+                                        """
+                                        SELECT indexname
+                                        FROM pg_indexes
+                                        WHERE schemaname = 'public'
+                                          AND tablename = 'telemetry_processing_event'
+                                          AND (
+                                              (
+                                                  indexname = 'ix_telemetry_processing_event_due_work'
+                                                  AND indexdef LIKE '%(next_attempt_at, created_at, id)%'
+                                                  AND indexdef LIKE '%WHERE%PENDING%'
+                                              )
+                                              OR (
+                                                  indexname = 'ix_telemetry_processing_event_expired_lease'
+                                                  AND indexdef LIKE '%(lease_expires_at, created_at, id)%'
+                                                  AND indexdef LIKE '%WHERE%PROCESSING%'
+                                              )
+                                          )
+                                        ORDER BY indexname
+                                        """)
+                                .query(String.class)
+                                .list())
+                .containsExactly(
+                        "ix_telemetry_processing_event_due_work",
+                        "ix_telemetry_processing_event_expired_lease");
+
+        assertThat(
+                        jdbcClient
+                                .sql(
+                                        """
+                                        SELECT conname
+                                        FROM pg_constraint
+                                        WHERE conrelid = 'telemetry_processing_event'::regclass
+                                          AND conname LIKE 'ck_telemetry_processing_event_%'
+                                        ORDER BY conname
+                                        """)
+                                .query(String.class)
+                                .list())
+                .contains(
+                        "ck_telemetry_processing_event_attempt_count",
+                        "ck_telemetry_processing_event_claim_owner",
+                        "ck_telemetry_processing_event_error_fields",
+                        "ck_telemetry_processing_event_state_consistency",
+                        "ck_telemetry_processing_event_status");
+    }
+
+    private void assertAlertSchema(JdbcClient jdbcClient) {
+        assertThat(
+                        jdbcClient
+                                .sql(
+                                        """
+                                        SELECT CONCAT_WS(
+                                            '|',
+                                            column_name,
+                                            data_type,
+                                            COALESCE(character_maximum_length::text, '-'),
+                                            is_nullable,
+                                            (column_default IS NOT NULL)::text
+                                        )
+                                        FROM information_schema.columns
+                                        WHERE table_schema = 'public'
+                                          AND table_name = 'alert'
+                                        ORDER BY column_name
+                                        """)
+                                .query(String.class)
+                                .list())
+                .containsExactly(
+                        "cooldown_until|timestamp with time zone|-|NO|false",
+                        "created_at|timestamp with time zone|-|NO|false",
+                        "fingerprint|character|64|NO|false",
+                        "first_occurred_at|timestamp with time zone|-|NO|false",
+                        "id|uuid|-|NO|false",
+                        "last_occurred_at|timestamp with time zone|-|NO|false",
+                        "occurrence_count|bigint|-|NO|true",
+                        "organisation_id|uuid|-|NO|false",
+                        "status|character varying|16|NO|true",
+                        "threshold_rule_id|uuid|-|NO|false",
+                        "updated_at|timestamp with time zone|-|NO|false");
+
+        assertThat(
+                        jdbcClient
+                                .sql(
+                                        """
+                                        SELECT indexname
+                                        FROM pg_indexes
+                                        WHERE schemaname = 'public'
+                                          AND tablename = 'alert'
+                                          AND indexname IN (
+                                              'ix_alert_organisation_status_last_occurred_id',
+                                              'uq_alert_organisation_fingerprint',
+                                              'uq_alert_organisation_rule'
+                                          )
+                                        ORDER BY indexname
+                                        """)
+                                .query(String.class)
+                                .list())
+                .containsExactly(
+                        "ix_alert_organisation_status_last_occurred_id",
+                        "uq_alert_organisation_fingerprint",
+                        "uq_alert_organisation_rule");
+
+        assertThat(
+                        jdbcClient
+                                .sql(
+                                        """
+                                        SELECT index_class.relname
+                                        FROM pg_index index_metadata
+                                        JOIN pg_class index_class
+                                          ON index_class.oid = index_metadata.indexrelid
+                                        WHERE index_metadata.indrelid = 'alert'::regclass
+                                          AND index_metadata.indisunique
+                                          AND index_metadata.indpred IS NOT NULL
+                                        ORDER BY index_class.relname
+                                        """)
+                                .query(String.class)
+                                .list())
+                .containsExactly("uq_alert_organisation_fingerprint", "uq_alert_organisation_rule");
+
+        assertThat(
+                        jdbcClient
+                                .sql(
+                                        """
+                                        SELECT conname
+                                        FROM pg_constraint
+                                        WHERE conrelid = 'alert'::regclass
+                                        ORDER BY conname
+                                        """)
+                                .query(String.class)
+                                .list())
+                .contains(
+                        "ck_alert_fingerprint",
+                        "ck_alert_occurrence_count",
+                        "ck_alert_occurrence_timestamps",
+                        "ck_alert_record_timestamps",
+                        "ck_alert_status",
+                        "fk_alert_organisation",
+                        "fk_alert_threshold_rule",
+                        "pk_alert",
+                        "uq_alert_organisation_id")
+                .doesNotContain("uq_alert_organisation_fingerprint", "uq_alert_organisation_rule");
+
+        assertThat(
+                        jdbcClient
+                                .sql(
+                                        """
+                                        SELECT COUNT(*)::integer
+                                        FROM pg_constraint
+                                        WHERE conrelid = 'app_user'::regclass
+                                          AND conname = 'uq_app_user_organisation_id'
+                                        """)
+                                .query(Integer.class)
+                                .single())
+                .isOne();
+
+        assertThat(
+                        jdbcClient
+                                .sql(
+                                        """
+                                        SELECT CONCAT_WS(
+                                            '|',
+                                            column_name,
+                                            data_type,
+                                            COALESCE(character_maximum_length::text, '-'),
+                                            is_nullable
+                                        )
+                                        FROM information_schema.columns
+                                        WHERE table_schema = 'public'
+                                          AND table_name = 'alert_status_history'
+                                        ORDER BY column_name
+                                        """)
+                                .query(String.class)
+                                .list())
+                .containsExactly(
+                        "actor_user_id|uuid|-|NO",
+                        "alert_id|uuid|-|NO",
+                        "from_status|character varying|16|NO",
+                        "organisation_id|uuid|-|NO",
+                        "sequence_number|smallint|-|NO",
+                        "to_status|character varying|16|NO",
+                        "transitioned_at|timestamp with time zone|-|NO");
+
+        assertThat(
+                        jdbcClient
+                                .sql(
+                                        """
+                                        SELECT conname
+                                        FROM pg_constraint
+                                        WHERE conrelid = 'alert_status_history'::regclass
+                                        ORDER BY conname
+                                        """)
+                                .query(String.class)
+                                .list())
+                .containsExactly(
+                        "ck_alert_status_history_transition",
+                        "fk_alert_status_history_actor",
+                        "fk_alert_status_history_alert",
+                        "pk_alert_status_history");
+
+        assertThat(
+                        jdbcClient
+                                .sql(
+                                        """
+                                        SELECT tgname
+                                        FROM pg_trigger
+                                        WHERE tgrelid = 'alert_status_history'::regclass
+                                          AND NOT tgisinternal
+                                        """)
+                                .query(String.class)
+                                .list())
+                .containsExactly("tr_alert_status_history_immutable");
+    }
+
+    private void assertAlertHistoryConstraints(JdbcClient jdbcClient) {
+        jdbcClient
+                .sql(
+                        """
+                        INSERT INTO alert (
+                            id,
+                            organisation_id,
+                            threshold_rule_id,
+                            fingerprint,
+                            first_occurred_at,
+                            last_occurred_at,
+                            cooldown_until,
+                            created_at,
+                            updated_at
+                        )
+                        VALUES (
+                            '80000000-0000-0000-0000-000000000001',
+                            '00000000-0000-0000-0000-000000000001',
+                            '40000000-0000-0000-0000-000000000001',
+                            '1111111111111111111111111111111111111111111111111111111111111111',
+                            '2026-08-21 08:00:00+00',
+                            '2026-08-21 08:00:00+00',
+                            '2026-08-21 08:05:00+00',
+                            '2026-08-21 09:00:00+00',
+                            '2026-08-21 09:00:00+00'
+                        )
+                        """)
+                .update();
+        jdbcClient
+                .sql(
+                        """
+                        INSERT INTO alert_status_history (
+                            organisation_id,
+                            alert_id,
+                            sequence_number,
+                            from_status,
+                            to_status,
+                            actor_user_id,
+                            transitioned_at
+                        )
+                        VALUES (
+                            '00000000-0000-0000-0000-000000000001',
+                            '80000000-0000-0000-0000-000000000001',
+                            1,
+                            'OPEN',
+                            'ACKNOWLEDGED',
+                            '10000000-0000-0000-0000-000000000001',
+                            '2026-08-21 09:05:00+00'
+                        )
+                        """)
+                .update();
+
+        assertThatThrownBy(
+                        () ->
+                                jdbcClient
+                                        .sql(
+                                                """
+                                                INSERT INTO alert_status_history (
+                                                    organisation_id,
+                                                    alert_id,
+                                                    sequence_number,
+                                                    from_status,
+                                                    to_status,
+                                                    actor_user_id,
+                                                    transitioned_at
+                                                )
+                                                VALUES (
+                                                    '00000000-0000-0000-0000-000000000002',
+                                                    '80000000-0000-0000-0000-000000000001',
+                                                    1,
+                                                    'OPEN',
+                                                    'ACKNOWLEDGED',
+                                                    '10000000-0000-0000-0000-000000000004',
+                                                    '2026-08-21 09:05:00+00'
+                                                )
+                                                """)
+                                        .update())
+                .isInstanceOf(DataIntegrityViolationException.class);
+        assertThatThrownBy(
+                        () ->
+                                jdbcClient
+                                        .sql(
+                                                """
+                                                INSERT INTO alert_status_history (
+                                                    organisation_id,
+                                                    alert_id,
+                                                    sequence_number,
+                                                    from_status,
+                                                    to_status,
+                                                    actor_user_id,
+                                                    transitioned_at
+                                                )
+                                                VALUES (
+                                                    '00000000-0000-0000-0000-000000000001',
+                                                    '80000000-0000-0000-0000-000000000001',
+                                                    2,
+                                                    'ACKNOWLEDGED',
+                                                    'RESOLVED',
+                                                    '10000000-0000-0000-0000-000000000004',
+                                                    '2026-08-21 09:10:00+00'
+                                                )
+                                                """)
+                                        .update())
+                .isInstanceOf(DataIntegrityViolationException.class);
+        assertThatThrownBy(
+                        () ->
+                                jdbcClient
+                                        .sql(
+                                                """
+                                                INSERT INTO alert_status_history (
+                                                    organisation_id,
+                                                    alert_id,
+                                                    sequence_number,
+                                                    from_status,
+                                                    to_status,
+                                                    actor_user_id,
+                                                    transitioned_at
+                                                )
+                                                VALUES (
+                                                    '00000000-0000-0000-0000-000000000001',
+                                                    '80000000-0000-0000-0000-000000000001',
+                                                    2,
+                                                    'OPEN',
+                                                    'RESOLVED',
+                                                    '10000000-0000-0000-0000-000000000001',
+                                                    '2026-08-21 09:10:00+00'
+                                                )
+                                                """)
+                                        .update())
+                .isInstanceOf(DataIntegrityViolationException.class);
+        assertThatThrownBy(
+                        () ->
+                                jdbcClient
+                                        .sql(
+                                                """
+                                                UPDATE alert_status_history
+                                                SET transitioned_at = '2026-08-21 09:06:00+00'
+                                                WHERE organisation_id = '00000000-0000-0000-0000-000000000001'
+                                                  AND alert_id = '80000000-0000-0000-0000-000000000001'
+                                                  AND sequence_number = 1
+                                                """)
+                                        .update())
+                .isInstanceOf(DataIntegrityViolationException.class);
+        assertThatThrownBy(
+                        () ->
+                                jdbcClient
+                                        .sql(
+                                                """
+                                                DELETE FROM alert_status_history
+                                                WHERE organisation_id = '00000000-0000-0000-0000-000000000001'
+                                                  AND alert_id = '80000000-0000-0000-0000-000000000001'
+                                                  AND sequence_number = 1
+                                                """)
+                                        .update())
+                .isInstanceOf(DataIntegrityViolationException.class);
+
+        jdbcClient.sql("TRUNCATE TABLE alert_status_history").update();
+        jdbcClient
+                .sql(
+                        """
+                        DELETE FROM alert
+                        WHERE id = '80000000-0000-0000-0000-000000000001'
+                        """)
+                .update();
     }
 
     private void assertDatabaseConstraints(JdbcClient jdbcClient) {
@@ -302,6 +748,107 @@ class DatabaseMigrationTest {
                             1,
                             '2026-08-13 12:00:00+00'
                         )
+                        """)
+                .update();
+
+        jdbcClient
+                .sql(
+                        """
+                        INSERT INTO telemetry_processing_event (
+                            id,
+                            organisation_id,
+                            telemetry_batch_id,
+                            event_type,
+                            created_at
+                        )
+                        VALUES (
+                            '70000000-0000-0000-0000-000000000001',
+                            '00000000-0000-0000-0000-000000000001',
+                            '50000000-0000-0000-0000-000000000001',
+                            'TELEMETRY_BATCH_ACCEPTED',
+                            '2026-08-13 12:00:00+00'
+                        )
+                        """)
+                .update();
+
+        assertThat(
+                        count(
+                                jdbcClient,
+                                """
+                                SELECT COUNT(*)::integer
+                                FROM telemetry_processing_event
+                                WHERE id = '70000000-0000-0000-0000-000000000001'
+                                  AND status = 'PENDING'
+                                  AND attempt_count = 0
+                                  AND next_attempt_at IS NOT NULL
+                                  AND updated_at IS NOT NULL
+                                  AND next_attempt_at = updated_at
+                                  AND claim_token IS NULL
+                                  AND claim_owner IS NULL
+                                  AND lease_expires_at IS NULL
+                                  AND completed_at IS NULL
+                                  AND dead_at IS NULL
+                                  AND last_error_code IS NULL
+                                  AND last_error_message IS NULL
+                                """))
+                .isOne();
+
+        assertThatThrownBy(
+                        () ->
+                                jdbcClient
+                                        .sql(
+                                                """
+                                                UPDATE telemetry_processing_event
+                                                SET status = 'UNKNOWN'
+                                                WHERE id = '70000000-0000-0000-0000-000000000001'
+                                                """)
+                                        .update())
+                .isInstanceOf(DataIntegrityViolationException.class);
+
+        assertThatThrownBy(
+                        () ->
+                                jdbcClient
+                                        .sql(
+                                                """
+                                                UPDATE telemetry_processing_event
+                                                SET attempt_count = 6
+                                                WHERE id = '70000000-0000-0000-0000-000000000001'
+                                                """)
+                                        .update())
+                .isInstanceOf(DataIntegrityViolationException.class);
+
+        assertThatThrownBy(
+                        () ->
+                                jdbcClient
+                                        .sql(
+                                                """
+                                                UPDATE telemetry_processing_event
+                                                SET status = 'PROCESSING',
+                                                    attempt_count = 1,
+                                                    next_attempt_at = NULL
+                                                WHERE id = '70000000-0000-0000-0000-000000000001'
+                                                """)
+                                        .update())
+                .isInstanceOf(DataIntegrityViolationException.class);
+
+        assertThatThrownBy(
+                        () ->
+                                jdbcClient
+                                        .sql(
+                                                """
+                                                UPDATE telemetry_processing_event
+                                                SET last_error_code = REPEAT('X', 65),
+                                                    last_error_message = 'Fixed safe message'
+                                                WHERE id = '70000000-0000-0000-0000-000000000001'
+                                                """)
+                                        .update())
+                .isInstanceOf(DataIntegrityViolationException.class);
+
+        jdbcClient
+                .sql(
+                        """
+                        DELETE FROM telemetry_processing_event
+                        WHERE id = '70000000-0000-0000-0000-000000000001'
                         """)
                 .update();
 
@@ -462,5 +1009,8 @@ class DatabaseMigrationTest {
             int sensors,
             int thresholdRules,
             int telemetryBatches,
-            int telemetryReadings) {}
+            int telemetryReadings,
+            int telemetryProcessingEvents,
+            int alerts,
+            int alertHistoryEntries) {}
 }

@@ -14,6 +14,8 @@ frontend/dist/
 frontend/coverage/
 frontend/playwright-report/
 frontend/test-results/
+simulator/node_modules/
+simulator/coverage/
 docs/
 
 tmp/

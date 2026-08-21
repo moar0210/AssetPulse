@@ -81,7 +81,24 @@ function installFetch(
 ) {
   const fetchMock = vi.fn<typeof fetch>((input, init) => {
     const url = String(input);
-    return url === "/api/v1/assets" ? assetHandler(init) : handler(url, init);
+    if (url === "/api/v1/assets") {
+      return assetHandler(init);
+    }
+
+    if (url.startsWith("/api/v1/sensors/")) {
+      const parsedUrl = new URL(url, "http://localhost");
+      const sensorId = parsedUrl.pathname.split("/")[4];
+      return Promise.resolve(
+        jsonResponse({
+          sensorId,
+          from: parsedUrl.searchParams.get("from"),
+          to: parsedUrl.searchParams.get("to"),
+          readings: [],
+        }),
+      );
+    }
+
+    return handler(url, init);
   });
   vi.stubGlobal("fetch", fetchMock);
   return fetchMock;

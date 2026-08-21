@@ -12,11 +12,15 @@ import org.springframework.transaction.annotation.Transactional;
 public class TelemetryBatchService {
 
     private final TelemetryBatchRepository repository;
+    private final TelemetryProcessingEventRepository processingEventRepository;
     private final TelemetryBatchFingerprint fingerprint;
 
     public TelemetryBatchService(
-            TelemetryBatchRepository repository, TelemetryBatchFingerprint fingerprint) {
+            TelemetryBatchRepository repository,
+            TelemetryProcessingEventRepository processingEventRepository,
+            TelemetryBatchFingerprint fingerprint) {
         this.repository = repository;
+        this.processingEventRepository = processingEventRepository;
         this.fingerprint = fingerprint;
     }
 
@@ -53,6 +57,8 @@ public class TelemetryBatchService {
 
         if (created.isPresent()) {
             repository.insertReadings(organisationId, batch.id(), request.readings());
+            processingEventRepository.insertBatchAccepted(
+                    organisationId, batch.id(), Instant.now());
         }
 
         return new TelemetryBatchResponse(

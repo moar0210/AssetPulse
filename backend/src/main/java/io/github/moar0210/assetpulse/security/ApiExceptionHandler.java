@@ -1,10 +1,15 @@
 package io.github.moar0210.assetpulse.security;
 
+import io.github.moar0210.assetpulse.alerts.AlertNotFoundException;
+import io.github.moar0210.assetpulse.alerts.AlertStateConflictException;
+import io.github.moar0210.assetpulse.alerts.InvalidAlertQueryException;
 import io.github.moar0210.assetpulse.assets.AssetNotFoundException;
 import io.github.moar0210.assetpulse.identity.AlreadyAuthenticatedException;
 import io.github.moar0210.assetpulse.identity.AuthenticationFailedException;
 import io.github.moar0210.assetpulse.identity.AuthenticationUnavailableException;
 import io.github.moar0210.assetpulse.telemetry.InvalidSensorReferenceException;
+import io.github.moar0210.assetpulse.telemetry.InvalidTelemetryRangeException;
+import io.github.moar0210.assetpulse.telemetry.SensorNotFoundException;
 import io.github.moar0210.assetpulse.telemetry.TelemetryIdempotencyConflictException;
 import jakarta.servlet.http.HttpServletRequest;
 import java.util.LinkedHashMap;
@@ -68,6 +73,56 @@ public class ApiExceptionHandler {
                 "ASSET_NOT_FOUND",
                 "Asset not found",
                 "The requested asset does not exist or is not accessible.");
+    }
+
+    @ExceptionHandler(AlertNotFoundException.class)
+    ResponseEntity<ProblemDetail> alertNotFound(HttpServletRequest request) {
+        return problem(
+                request,
+                HttpStatus.NOT_FOUND,
+                "ALERT_NOT_FOUND",
+                "Alert not found",
+                "The requested alert does not exist or is not accessible.");
+    }
+
+    @ExceptionHandler(AlertStateConflictException.class)
+    ResponseEntity<ProblemDetail> alertStateConflict(HttpServletRequest request) {
+        return problem(
+                request,
+                HttpStatus.CONFLICT,
+                "ALERT_STATE_CONFLICT",
+                "Alert state conflict",
+                "The alert cannot transition from its current state.");
+    }
+
+    @ExceptionHandler(InvalidAlertQueryException.class)
+    ResponseEntity<ProblemDetail> invalidAlertQuery(HttpServletRequest request) {
+        return problem(
+                request,
+                HttpStatus.BAD_REQUEST,
+                "INVALID_ALERT_QUERY",
+                "Invalid alert query",
+                "Provide a valid alert result limit from 1 to 100.");
+    }
+
+    @ExceptionHandler(SensorNotFoundException.class)
+    ResponseEntity<ProblemDetail> sensorNotFound(HttpServletRequest request) {
+        return problem(
+                request,
+                HttpStatus.NOT_FOUND,
+                "SENSOR_NOT_FOUND",
+                "Sensor not found",
+                "The requested sensor does not exist or is not accessible.");
+    }
+
+    @ExceptionHandler(InvalidTelemetryRangeException.class)
+    ResponseEntity<ProblemDetail> invalidTelemetryRange(HttpServletRequest request) {
+        return problem(
+                request,
+                HttpStatus.BAD_REQUEST,
+                "INVALID_TELEMETRY_RANGE",
+                "Invalid telemetry range",
+                "Provide a valid telemetry time range and result limit.");
     }
 
     @ExceptionHandler(InvalidSensorReferenceException.class)

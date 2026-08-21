@@ -70,11 +70,13 @@ class TelemetryBatchIntegrationTest {
     @Autowired private JdbcClient jdbcClient;
     @Autowired private TelemetryBatchService telemetryBatchService;
     @Autowired private TelemetryBatchRepository telemetryBatchRepository;
+    @Autowired private TelemetryProcessingEventRepository telemetryProcessingEventRepository;
     @Autowired private TelemetryBatchFingerprint telemetryBatchFingerprint;
     @Autowired private TransactionTemplate transactionTemplate;
 
     @BeforeEach
     void clearTelemetry() {
+        jdbcClient.sql("DELETE FROM telemetry_processing_event").update();
         jdbcClient.sql("DELETE FROM telemetry_reading").update();
         jdbcClient.sql("DELETE FROM telemetry_batch").update();
     }
@@ -99,6 +101,7 @@ class TelemetryBatchIntegrationTest {
                 .isEqualTo(first.getResponse().getContentAsString());
         assertThat(count("telemetry_batch")).isOne();
         assertThat(count("telemetry_reading")).isOne();
+        assertThat(count("telemetry_processing_event")).isOne();
     }
 
     @Test
@@ -115,6 +118,7 @@ class TelemetryBatchIntegrationTest {
 
         assertThat(count("telemetry_batch")).isOne();
         assertThat(count("telemetry_reading")).isOne();
+        assertThat(count("telemetry_processing_event")).isOne();
     }
 
     @Test
@@ -152,6 +156,10 @@ class TelemetryBatchIntegrationTest {
                                                             .orElseThrow();
                                             telemetryBatchRepository.insertReadings(
                                                     organisationId, batch.id(), request.readings());
+                                            telemetryProcessingEventRepository.insertBatchAccepted(
+                                                    organisationId,
+                                                    batch.id(),
+                                                    Instant.parse("2026-08-13T12:30:00Z"));
                                             inserted.countDown();
                                             await(allowCommit);
                                         });
@@ -172,6 +180,7 @@ class TelemetryBatchIntegrationTest {
 
         assertThat(count("telemetry_batch")).isOne();
         assertThat(count("telemetry_reading")).isOne();
+        assertThat(count("telemetry_processing_event")).isOne();
     }
 
     @Test
@@ -196,6 +205,7 @@ class TelemetryBatchIntegrationTest {
                 .isNotEqualTo(objectMapper.readTree(riversideBody).path("batchId").asText());
         assertThat(count("telemetry_batch")).isEqualTo(2);
         assertThat(count("telemetry_reading")).isEqualTo(2);
+        assertThat(count("telemetry_processing_event")).isEqualTo(2);
     }
 
     @Test
@@ -213,6 +223,7 @@ class TelemetryBatchIntegrationTest {
 
         assertThat(count("telemetry_batch")).isZero();
         assertThat(count("telemetry_reading")).isZero();
+        assertThat(count("telemetry_processing_event")).isZero();
     }
 
     @Test
@@ -233,6 +244,7 @@ class TelemetryBatchIntegrationTest {
 
         assertThat(count("telemetry_batch")).isZero();
         assertThat(count("telemetry_reading")).isZero();
+        assertThat(count("telemetry_processing_event")).isZero();
     }
 
     @Test
@@ -288,6 +300,7 @@ class TelemetryBatchIntegrationTest {
 
         assertThat(count("telemetry_batch")).isZero();
         assertThat(count("telemetry_reading")).isZero();
+        assertThat(count("telemetry_processing_event")).isZero();
     }
 
     @Test
@@ -337,6 +350,7 @@ class TelemetryBatchIntegrationTest {
 
         assertThat(count("telemetry_batch")).isZero();
         assertThat(count("telemetry_reading")).isZero();
+        assertThat(count("telemetry_processing_event")).isZero();
     }
 
     private org.springframework.test.web.servlet.ResultActions accept(
