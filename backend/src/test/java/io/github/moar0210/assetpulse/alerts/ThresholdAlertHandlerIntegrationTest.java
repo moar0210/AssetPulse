@@ -30,6 +30,7 @@ import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
@@ -41,6 +42,8 @@ class ThresholdAlertHandlerIntegrationTest {
 
     private static final UUID NORTHSTAR_ID =
             UUID.fromString("00000000-0000-0000-0000-000000000001");
+    private static final UUID NORTHSTAR_ADMIN_ID =
+            UUID.fromString("10000000-0000-0000-0000-000000000001");
     private static final UUID RIVERSIDE_ID =
             UUID.fromString("00000000-0000-0000-0000-000000000002");
     private static final UUID NORTHSTAR_SENSOR_ID =
@@ -72,9 +75,12 @@ class ThresholdAlertHandlerIntegrationTest {
     @Autowired private TelemetryProcessingExecutionService executionService;
     @Autowired private ThresholdAlertRepository alertRepository;
     @Autowired private ThresholdAlertHandler handler;
+    @Autowired private AlertCommandService commandService;
+    @Autowired private TransactionTemplate transactionTemplate;
 
     @BeforeEach
     void resetTelemetryAndAlerts() {
+        jdbcClient.sql("TRUNCATE TABLE alert_status_history").update();
         jdbcClient.sql("DELETE FROM alert").update();
         jdbcClient.sql("DELETE FROM telemetry_processing_event").update();
         jdbcClient.sql("DELETE FROM telemetry_reading").update();
@@ -349,6 +355,328 @@ class ThresholdAlertHandlerIntegrationTest {
         TelemetryProcessingClaim second =
                 lifecycleService.claimNext("worker-b", FIRST_CLAIM_AT).orElseThrow();
         ExecutorService executor = Executors.newFixedThreadPool(2);
+        CountDownLatch firstOccurrenceApplied = new CountDownLatch(1);
+        CountDownLatch allowFirstCommit = new CountDownLatch(1);
+        CountDownLatch secondHandlerEntered = new CountDownLatch(1);
+
+        try {
+            Future<Boolean> firstResult =
+                    executor.submit(
+                            () ->
+                                    executionService.execute(
+                                            first,
+                                            event -> {
+                                                handler.handle(event);
+                                                firstOccurrenceApplied.countDown();
+                                                await(allowFirstCommit);
+                                            }));
+            assertThat(firstOccurrenceApplied.await(10, TimeUnit.SECONDS)).isTrue();
+
+            Future<Boolean> secondResult =
+                    executor.submit(
+                            () ->
+                                    executionService.execute(
+                                            second,
+                                            event -> {
+                                                secondHandlerEntered.countDown();
+                                                handler.handle(event);
+                                            }));
+            assertThat(secondHandlerEntered.await(10, TimeUnit.SECONDS)).isTrue();
+            assertThat(waitForBlockedThresholdRuleLock()).isTrue();
+
+            allowFirstCommit.countDown();
+
+            assertThat(firstResult.get(10, TimeUnit.SECONDS)).isTrue();
+            assertThat(secondResult.get(10, TimeUnit.SECONDS)).isTrue();
+        } finally {
+            allowFirstCommit.countDown();
+            executor.shutdownNow();
+        }
+
+        AlertRow alert = readOnlyAlert();
+        assertThat(alert.occurrenceCount()).isEqualTo(2);
+        assertThat(alert.firstOccurredAt()).isEqualTo(FIRST_OBSERVED_AT);
+        assertThat(alert.lastOccurredAt()).isEqualTo(FIRST_OBSERVED_AT.plusSeconds(1));
+        assertThat(countAlerts()).isOne();
+        assertThat(totalOccurrenceCount()).isEqualTo(2);
+        assertThat(countEventsWithStatus("COMPLETED")).isEqualTo(2);
+    }
+
+    @Test
+    void breachBeforeResolvedCooldownUpdatesOnlyTheResolvedIncident() {
+        AlertRow resolved =
+                createResolvedAlert("resolved-inside-cooldown", "worker-resolved-inside");
+        EventFixture inside =
+                createPendingEvent(
+                        "breach-inside-resolved-cooldown",
+                        FIRST_EVENT_AT.plusSeconds(1),
+                        new ReadingFixture(
+                                NORTHSTAR_SENSOR_ID,
+                                new BigDecimal("91.000000"),
+                                FIRST_OBSERVED_AT.plusSeconds(299)));
+
+        process(inside, "worker-inside-resolved-cooldown", FIRST_CLAIM_AT.plusSeconds(1));
+
+        AlertRow resolvedAfter = readAlertWithStatus("RESOLVED");
+        assertThat(resolvedAfter.id()).isEqualTo(resolved.id());
+        assertThat(resolvedAfter.occurrenceCount()).isEqualTo(2);
+        assertThat(resolvedAfter.firstOccurredAt()).isEqualTo(FIRST_OBSERVED_AT);
+        assertThat(resolvedAfter.lastOccurredAt()).isEqualTo(FIRST_OBSERVED_AT.plusSeconds(299));
+        assertThat(resolvedAfter.cooldownUntil()).isEqualTo(FIRST_OBSERVED_AT.plusSeconds(300));
+        assertThat(countAlerts()).isOne();
+        assertThat(countAlertsWithStatus("OPEN")).isZero();
+        assertThat(totalOccurrenceCount()).isEqualTo(2);
+        assertThat(countAlertHistory()).isZero();
+    }
+
+    @Test
+    void breachAtResolvedCooldownCreatesOneNewOpenIncident() {
+        AlertRow resolved =
+                createResolvedAlert("resolved-at-cooldown", "worker-resolved-at-boundary");
+        EventFixture boundary =
+                createPendingEvent(
+                        "breach-at-resolved-cooldown",
+                        FIRST_EVENT_AT.plusSeconds(1),
+                        new ReadingFixture(
+                                NORTHSTAR_SENSOR_ID,
+                                new BigDecimal("91.000000"),
+                                FIRST_OBSERVED_AT.plusSeconds(300)));
+
+        process(boundary, "worker-at-resolved-cooldown", FIRST_CLAIM_AT.plusSeconds(1));
+
+        AlertRow resolvedAfter = readAlertWithStatus("RESOLVED");
+        assertThat(resolvedAfter.id()).isEqualTo(resolved.id());
+        assertThat(resolvedAfter.occurrenceCount()).isOne();
+        assertThat(resolvedAfter.lastOccurredAt()).isEqualTo(FIRST_OBSERVED_AT);
+        assertThat(resolvedAfter.cooldownUntil()).isEqualTo(FIRST_OBSERVED_AT.plusSeconds(300));
+
+        AlertRow opened = readAlertWithStatus("OPEN");
+        assertThat(opened.id()).isNotEqualTo(resolved.id());
+        assertThat(opened.fingerprint()).isEqualTo(resolved.fingerprint());
+        assertThat(opened.occurrenceCount()).isOne();
+        assertThat(opened.firstOccurredAt()).isEqualTo(FIRST_OBSERVED_AT.plusSeconds(300));
+        assertThat(opened.lastOccurredAt()).isEqualTo(FIRST_OBSERVED_AT.plusSeconds(300));
+        assertThat(opened.cooldownUntil()).isEqualTo(FIRST_OBSERVED_AT.plusSeconds(600));
+        assertThat(countAlerts()).isEqualTo(2);
+        assertThat(totalOccurrenceCount()).isEqualTo(2);
+        assertThat(countAlertHistory()).isZero();
+    }
+
+    @Test
+    void acknowledgedAlertKeepsAccumulatingOccurrencesAcrossCooldowns() {
+        EventFixture initial =
+                createPendingEvent(
+                        "acknowledged-active-alert",
+                        FIRST_EVENT_AT,
+                        new ReadingFixture(
+                                NORTHSTAR_SENSOR_ID,
+                                new BigDecimal("90.000000"),
+                                FIRST_OBSERVED_AT));
+        process(initial, "worker-acknowledged-initial", FIRST_CLAIM_AT);
+        AlertRow acknowledged = readOnlyAlert();
+        assertThat(
+                        jdbcClient
+                                .sql("UPDATE alert SET status = 'ACKNOWLEDGED' WHERE id = :alertId")
+                                .param("alertId", acknowledged.id())
+                                .update())
+                .isOne();
+        EventFixture later =
+                createPendingEvent(
+                        "acknowledged-active-later-breach",
+                        FIRST_EVENT_AT.plusSeconds(1),
+                        new ReadingFixture(
+                                NORTHSTAR_SENSOR_ID,
+                                new BigDecimal("91.000000"),
+                                FIRST_OBSERVED_AT.plusSeconds(600)));
+
+        process(later, "worker-acknowledged-later", FIRST_CLAIM_AT.plusSeconds(1));
+
+        AlertRow acknowledgedAfter = readAlertWithStatus("ACKNOWLEDGED");
+        assertThat(acknowledgedAfter.id()).isEqualTo(acknowledged.id());
+        assertThat(acknowledgedAfter.occurrenceCount()).isEqualTo(2);
+        assertThat(acknowledgedAfter.lastOccurredAt())
+                .isEqualTo(FIRST_OBSERVED_AT.plusSeconds(600));
+        assertThat(acknowledgedAfter.cooldownUntil()).isEqualTo(FIRST_OBSERVED_AT.plusSeconds(900));
+        assertThat(countAlerts()).isOne();
+        assertThat(totalOccurrenceCount()).isEqualTo(2);
+        assertThat(countAlertHistory()).isZero();
+    }
+
+    @Test
+    void occurrenceThatLocksBeforeResolutionStaysOnResolvedIncident() throws Exception {
+        AlertRow acknowledged =
+                createAcknowledgedAlert("occurrence-before-resolution", "worker-occurrence-first");
+        Instant boundary = FIRST_OBSERVED_AT.plusSeconds(300);
+        EventFixture later =
+                createPendingEvent(
+                        "boundary-occurrence-before-resolution",
+                        FIRST_EVENT_AT.plusSeconds(1),
+                        new ReadingFixture(
+                                NORTHSTAR_SENSOR_ID, new BigDecimal("91.000000"), boundary));
+        TelemetryProcessingClaim claim =
+                lifecycleService
+                        .claimNext(
+                                "worker-boundary-occurrence-first", FIRST_CLAIM_AT.plusSeconds(1))
+                        .orElseThrow();
+        assertThat(claim.event().id()).isEqualTo(later.eventId());
+
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        CountDownLatch occurrenceApplied = new CountDownLatch(1);
+        CountDownLatch allowOccurrenceCommit = new CountDownLatch(1);
+        try {
+            Future<Boolean> occurrenceResult =
+                    executor.submit(
+                            () ->
+                                    executionService.execute(
+                                            claim,
+                                            event -> {
+                                                handler.handle(event);
+                                                occurrenceApplied.countDown();
+                                                await(allowOccurrenceCommit);
+                                            }));
+            assertThat(occurrenceApplied.await(10, TimeUnit.SECONDS)).isTrue();
+
+            Future<AlertDetailResponse> resolutionResult =
+                    executor.submit(
+                            () ->
+                                    commandService.resolve(
+                                            NORTHSTAR_ID, NORTHSTAR_ADMIN_ID, acknowledged.id()));
+
+            assertThat(waitForBlockedAlertTransition()).isTrue();
+            allowOccurrenceCommit.countDown();
+
+            assertThat(occurrenceResult.get(10, TimeUnit.SECONDS)).isTrue();
+            AlertDetailResponse resolvedResponse = resolutionResult.get(10, TimeUnit.SECONDS);
+            assertForwardOnlyHistory(resolvedResponse, acknowledged.id());
+        } finally {
+            allowOccurrenceCommit.countDown();
+            executor.shutdownNow();
+        }
+
+        AlertRow resolved = readAlertWithStatus("RESOLVED");
+        assertThat(resolved.id()).isEqualTo(acknowledged.id());
+        assertThat(resolved.fingerprint()).isEqualTo(acknowledged.fingerprint());
+        assertThat(resolved.occurrenceCount()).isEqualTo(2);
+        assertThat(resolved.firstOccurredAt()).isEqualTo(FIRST_OBSERVED_AT);
+        assertThat(resolved.lastOccurredAt()).isEqualTo(boundary);
+        assertThat(resolved.cooldownUntil()).isEqualTo(boundary.plusSeconds(300));
+        assertThat(countAlerts()).isOne();
+        assertThat(countActiveAlerts()).isZero();
+        assertThat(totalOccurrenceCount()).isEqualTo(2);
+        assertThat(countAlertHistory(resolved.id())).isEqualTo(2);
+        assertThat(readEventStatus(later.eventId())).isEqualTo("COMPLETED");
+    }
+
+    @Test
+    void resolutionThatLocksBeforeBoundaryOccurrenceOpensNewIncident() throws Exception {
+        AlertRow acknowledged =
+                createAcknowledgedAlert("resolution-before-occurrence", "worker-resolution-first");
+        Instant boundary = FIRST_OBSERVED_AT.plusSeconds(300);
+        EventFixture later =
+                createPendingEvent(
+                        "boundary-occurrence-after-resolution",
+                        FIRST_EVENT_AT.plusSeconds(1),
+                        new ReadingFixture(
+                                NORTHSTAR_SENSOR_ID, new BigDecimal("91.000000"), boundary));
+        TelemetryProcessingClaim claim =
+                lifecycleService
+                        .claimNext(
+                                "worker-boundary-resolution-first", FIRST_CLAIM_AT.plusSeconds(1))
+                        .orElseThrow();
+        assertThat(claim.event().id()).isEqualTo(later.eventId());
+
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        CountDownLatch resolutionApplied = new CountDownLatch(1);
+        CountDownLatch allowResolutionCommit = new CountDownLatch(1);
+        CountDownLatch occurrenceEntered = new CountDownLatch(1);
+        try {
+            Future<AlertDetailResponse> resolutionResult =
+                    executor.submit(
+                            () ->
+                                    transactionTemplate.execute(
+                                            transactionStatus -> {
+                                                AlertDetailResponse response =
+                                                        commandService.resolve(
+                                                                NORTHSTAR_ID,
+                                                                NORTHSTAR_ADMIN_ID,
+                                                                acknowledged.id());
+                                                resolutionApplied.countDown();
+                                                await(allowResolutionCommit);
+                                                return response;
+                                            }));
+            assertThat(resolutionApplied.await(10, TimeUnit.SECONDS)).isTrue();
+
+            Future<Boolean> occurrenceResult =
+                    executor.submit(
+                            () ->
+                                    executionService.execute(
+                                            claim,
+                                            event -> {
+                                                occurrenceEntered.countDown();
+                                                handler.handle(event);
+                                            }));
+            assertThat(occurrenceEntered.await(10, TimeUnit.SECONDS)).isTrue();
+            assertThat(waitForBlockedAlertOccurrence()).isTrue();
+            allowResolutionCommit.countDown();
+
+            AlertDetailResponse resolvedResponse = resolutionResult.get(10, TimeUnit.SECONDS);
+            assertForwardOnlyHistory(resolvedResponse, acknowledged.id());
+            assertThat(occurrenceResult.get(10, TimeUnit.SECONDS)).isTrue();
+        } finally {
+            allowResolutionCommit.countDown();
+            executor.shutdownNow();
+        }
+
+        AlertRow resolved = readAlertWithStatus("RESOLVED");
+        assertThat(resolved.id()).isEqualTo(acknowledged.id());
+        assertThat(resolved.fingerprint()).isEqualTo(acknowledged.fingerprint());
+        assertThat(resolved.occurrenceCount()).isOne();
+        assertThat(resolved.firstOccurredAt()).isEqualTo(FIRST_OBSERVED_AT);
+        assertThat(resolved.lastOccurredAt()).isEqualTo(FIRST_OBSERVED_AT);
+        assertThat(resolved.cooldownUntil()).isEqualTo(boundary);
+        assertThat(countAlertHistory(resolved.id())).isEqualTo(2);
+
+        AlertRow opened = readAlertWithStatus("OPEN");
+        assertThat(opened.id()).isNotEqualTo(resolved.id());
+        assertThat(opened.fingerprint()).isEqualTo(resolved.fingerprint());
+        assertThat(opened.occurrenceCount()).isOne();
+        assertThat(opened.firstOccurredAt()).isEqualTo(boundary);
+        assertThat(opened.lastOccurredAt()).isEqualTo(boundary);
+        assertThat(opened.cooldownUntil()).isEqualTo(boundary.plusSeconds(300));
+        assertThat(countAlertHistory(opened.id())).isZero();
+        assertThat(countAlerts()).isEqualTo(2);
+        assertThat(countActiveAlerts()).isOne();
+        assertThat(totalOccurrenceCount()).isEqualTo(2);
+        assertThat(readEventStatus(later.eventId())).isEqualTo("COMPLETED");
+    }
+
+    @Test
+    void concurrentBreachesAfterResolutionCreateOneNewOpenAlert() throws Exception {
+        AlertRow resolved = createResolvedAlert("resolved-alert", "worker-initial");
+
+        createPendingEvent(
+                "post-resolution-alert-a",
+                FIRST_EVENT_AT.plusSeconds(10),
+                new ReadingFixture(
+                        NORTHSTAR_SENSOR_ID,
+                        new BigDecimal("91.000000"),
+                        FIRST_OBSERVED_AT.plusSeconds(600)));
+        createPendingEvent(
+                "post-resolution-alert-b",
+                FIRST_EVENT_AT.plusSeconds(11),
+                new ReadingFixture(
+                        NORTHSTAR_SENSOR_ID,
+                        new BigDecimal("92.000000"),
+                        FIRST_OBSERVED_AT.plusSeconds(601)));
+        TelemetryProcessingClaim first =
+                lifecycleService
+                        .claimNext("worker-reopen-a", FIRST_CLAIM_AT.plusSeconds(10))
+                        .orElseThrow();
+        TelemetryProcessingClaim second =
+                lifecycleService
+                        .claimNext("worker-reopen-b", FIRST_CLAIM_AT.plusSeconds(10))
+                        .orElseThrow();
+        ExecutorService executor = Executors.newFixedThreadPool(2);
         CountDownLatch handlersReady = new CountDownLatch(2);
         CountDownLatch start = new CountDownLatch(1);
         TelemetryProcessingEventHandler concurrentHandler =
@@ -374,12 +702,23 @@ class ThresholdAlertHandlerIntegrationTest {
             executor.shutdownNow();
         }
 
-        AlertRow alert = readOnlyAlert();
-        assertThat(alert.occurrenceCount()).isEqualTo(2);
-        assertThat(alert.firstOccurredAt()).isEqualTo(FIRST_OBSERVED_AT);
-        assertThat(alert.lastOccurredAt()).isEqualTo(FIRST_OBSERVED_AT.plusSeconds(1));
-        assertThat(countAlerts()).isOne();
-        assertThat(countEventsWithStatus("COMPLETED")).isEqualTo(2);
+        AlertRow resolvedAfter = readAlertWithStatus("RESOLVED");
+        assertThat(resolvedAfter.id()).isEqualTo(resolved.id());
+        assertThat(resolvedAfter.occurrenceCount()).isOne();
+        assertThat(resolvedAfter.firstOccurredAt()).isEqualTo(FIRST_OBSERVED_AT);
+        assertThat(resolvedAfter.lastOccurredAt()).isEqualTo(FIRST_OBSERVED_AT);
+        assertThat(resolvedAfter.cooldownUntil()).isEqualTo(FIRST_OBSERVED_AT.plusSeconds(300));
+
+        AlertRow reopened = readAlertWithStatus("OPEN");
+        assertThat(reopened.id()).isNotEqualTo(resolved.id());
+        assertThat(reopened.fingerprint()).isEqualTo(resolved.fingerprint());
+        assertThat(reopened.occurrenceCount()).isEqualTo(2);
+        assertThat(reopened.firstOccurredAt()).isEqualTo(FIRST_OBSERVED_AT.plusSeconds(600));
+        assertThat(reopened.lastOccurredAt()).isEqualTo(FIRST_OBSERVED_AT.plusSeconds(601));
+        assertThat(countAlerts()).isEqualTo(2);
+        assertThat(totalOccurrenceCount()).isEqualTo(3);
+        assertThat(countAlertHistory()).isZero();
+        assertThat(countEventsWithStatus("COMPLETED")).isEqualTo(3);
     }
 
     @Test
@@ -398,8 +737,9 @@ class ThresholdAlertHandlerIntegrationTest {
 
         assertThatThrownBy(() -> jdbcClient.sql("UPDATE alert SET occurrence_count = 0").update())
                 .isInstanceOf(DataIntegrityViolationException.class);
-        assertThatThrownBy(
-                        () -> jdbcClient.sql("UPDATE alert SET status = 'ACKNOWLEDGED'").update())
+        assertThat(jdbcClient.sql("UPDATE alert SET status = 'ACKNOWLEDGED'").update()).isOne();
+        assertThat(jdbcClient.sql("UPDATE alert SET status = 'RESOLVED'").update()).isOne();
+        assertThatThrownBy(() -> jdbcClient.sql("UPDATE alert SET status = 'UNKNOWN'").update())
                 .isInstanceOf(DataIntegrityViolationException.class);
         assertThatThrownBy(
                         () ->
@@ -420,6 +760,62 @@ class ThresholdAlertHandlerIntegrationTest {
         TelemetryProcessingClaim claim = lifecycleService.claimNext(owner, claimedAt).orElseThrow();
         assertThat(claim.event().id()).isEqualTo(fixture.eventId());
         assertThat(executionService.execute(claim, handler)).isTrue();
+    }
+
+    private AlertRow createAcknowledgedAlert(String idempotencyKey, String owner) {
+        EventFixture initial =
+                createPendingEvent(
+                        idempotencyKey,
+                        FIRST_EVENT_AT,
+                        new ReadingFixture(
+                                NORTHSTAR_SENSOR_ID,
+                                new BigDecimal("90.000000"),
+                                FIRST_OBSERVED_AT));
+        process(initial, owner, FIRST_CLAIM_AT);
+        AlertRow opened = readOnlyAlert();
+        AlertDetailResponse acknowledged =
+                commandService.acknowledge(NORTHSTAR_ID, NORTHSTAR_ADMIN_ID, opened.id());
+        assertThat(acknowledged.status()).isEqualTo(AlertStatus.ACKNOWLEDGED);
+        return readOnlyAlert();
+    }
+
+    private AlertRow createResolvedAlert(String idempotencyKey, String owner) {
+        EventFixture initial =
+                createPendingEvent(
+                        idempotencyKey,
+                        FIRST_EVENT_AT,
+                        new ReadingFixture(
+                                NORTHSTAR_SENSOR_ID,
+                                new BigDecimal("90.000000"),
+                                FIRST_OBSERVED_AT));
+        process(initial, owner, FIRST_CLAIM_AT);
+        AlertRow resolved = readOnlyAlert();
+        assertThat(
+                        jdbcClient
+                                .sql("UPDATE alert SET status = 'RESOLVED' WHERE id = :alertId")
+                                .param("alertId", resolved.id())
+                                .update())
+                .isOne();
+        return resolved;
+    }
+
+    private static void assertForwardOnlyHistory(
+            AlertDetailResponse resolved, UUID expectedAlertId) {
+        assertThat(resolved.id()).isEqualTo(expectedAlertId);
+        assertThat(resolved.status()).isEqualTo(AlertStatus.RESOLVED);
+        assertThat(resolved.history())
+                .extracting(
+                        AlertHistoryResponse::sequenceNumber,
+                        AlertHistoryResponse::fromStatus,
+                        AlertHistoryResponse::toStatus)
+                .containsExactly(
+                        tuple(1, AlertStatus.OPEN, AlertStatus.ACKNOWLEDGED),
+                        tuple(2, AlertStatus.ACKNOWLEDGED, AlertStatus.RESOLVED));
+        assertThat(resolved.history())
+                .extracting(history -> history.actor().id())
+                .containsExactly(NORTHSTAR_ADMIN_ID, NORTHSTAR_ADMIN_ID);
+        assertThat(resolved.history().get(1).transitionedAt())
+                .isAfterOrEqualTo(resolved.history().get(0).transitionedAt());
     }
 
     private EventFixture createPendingEvent(
@@ -562,6 +958,30 @@ class ThresholdAlertHandlerIntegrationTest {
                 .single();
     }
 
+    private AlertRow readAlertWithStatus(String status) {
+        return jdbcClient
+                .sql(
+                        """
+                        SELECT
+                            id,
+                            organisation_id,
+                            threshold_rule_id,
+                            fingerprint,
+                            status,
+                            occurrence_count,
+                            first_occurred_at,
+                            last_occurred_at,
+                            cooldown_until,
+                            created_at,
+                            updated_at
+                        FROM alert
+                        WHERE status = :status
+                        """)
+                .param("status", status)
+                .query(ThresholdAlertHandlerIntegrationTest::mapAlert)
+                .single();
+    }
+
     private static AlertRow mapAlert(ResultSet resultSet, int rowNumber) throws SQLException {
         return new AlertRow(
                 resultSet.getObject("id", UUID.class),
@@ -585,6 +1005,55 @@ class ThresholdAlertHandlerIntegrationTest {
         return jdbcClient.sql("SELECT COUNT(*)::integer FROM alert").query(Integer.class).single();
     }
 
+    private int countAlertsWithStatus(String status) {
+        return jdbcClient
+                .sql("SELECT COUNT(*)::integer FROM alert WHERE status = :status")
+                .param("status", status)
+                .query(Integer.class)
+                .single();
+    }
+
+    private int countActiveAlerts() {
+        return jdbcClient
+                .sql(
+                        """
+                        SELECT COUNT(*)::integer
+                        FROM alert
+                        WHERE status IN ('OPEN', 'ACKNOWLEDGED')
+                        """)
+                .query(Integer.class)
+                .single();
+    }
+
+    private long totalOccurrenceCount() {
+        return jdbcClient
+                .sql("SELECT COALESCE(SUM(occurrence_count), 0)::bigint FROM alert")
+                .query(Long.class)
+                .single();
+    }
+
+    private int countAlertHistory() {
+        return jdbcClient
+                .sql("SELECT COUNT(*)::integer FROM alert_status_history")
+                .query(Integer.class)
+                .single();
+    }
+
+    private int countAlertHistory(UUID alertId) {
+        return jdbcClient
+                .sql(
+                        """
+                        SELECT COUNT(*)::integer
+                        FROM alert_status_history
+                        WHERE organisation_id = :organisationId
+                          AND alert_id = :alertId
+                        """)
+                .param("organisationId", NORTHSTAR_ID)
+                .param("alertId", alertId)
+                .query(Integer.class)
+                .single();
+    }
+
     private int countEventsWithStatus(String status) {
         return jdbcClient
                 .sql(
@@ -604,6 +1073,46 @@ class ThresholdAlertHandlerIntegrationTest {
                 .param("eventId", eventId)
                 .query(String.class)
                 .single();
+    }
+
+    private boolean waitForBlockedAlertTransition() throws InterruptedException {
+        return waitForBlockedAlertQuery("%UPDATE alert%", "%SET status =%");
+    }
+
+    private boolean waitForBlockedThresholdRuleLock() throws InterruptedException {
+        return waitForBlockedAlertQuery("%FROM threshold_rule%", "%FOR UPDATE%");
+    }
+
+    private boolean waitForBlockedAlertOccurrence() throws InterruptedException {
+        return waitForBlockedAlertQuery("%WITH locked_alert AS MATERIALIZED%", null);
+    }
+
+    private boolean waitForBlockedAlertQuery(String queryPattern, String secondQueryPattern)
+            throws InterruptedException {
+        for (int attempt = 0; attempt < 200; attempt++) {
+            String secondPredicate =
+                    secondQueryPattern == null ? "" : " AND query LIKE :secondQueryPattern";
+            JdbcClient.StatementSpec statement =
+                    jdbcClient
+                            .sql(
+                                    """
+                                    SELECT COUNT(*)::integer
+                                    FROM pg_stat_activity
+                                    WHERE pid <> pg_backend_pid()
+                                      AND wait_event_type = 'Lock'
+                                      AND query LIKE :queryPattern
+                                    """
+                                            + secondPredicate)
+                            .param("queryPattern", queryPattern);
+            if (secondQueryPattern != null) {
+                statement = statement.param("secondQueryPattern", secondQueryPattern);
+            }
+            if (statement.query(Integer.class).single() > 0) {
+                return true;
+            }
+            Thread.sleep(25);
+        }
+        return false;
     }
 
     private static void await(CountDownLatch latch) {

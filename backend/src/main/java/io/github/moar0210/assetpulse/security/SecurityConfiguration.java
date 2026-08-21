@@ -164,6 +164,16 @@ public class SecurityConfiguration {
                                                 "/api/v1/sensors/{sensorId}/telemetry-readings")
                                         .hasAnyRole("OPERATIONS_ADMIN", "TECHNICIAN", "VIEWER")
                                         .requestMatchers(
+                                                HttpMethod.GET,
+                                                "/api/v1/alerts",
+                                                "/api/v1/alerts/{alertId}")
+                                        .hasAnyRole("OPERATIONS_ADMIN", "TECHNICIAN", "VIEWER")
+                                        .requestMatchers(
+                                                HttpMethod.POST,
+                                                "/api/v1/alerts/{alertId}/acknowledge",
+                                                "/api/v1/alerts/{alertId}/resolve")
+                                        .hasRole("OPERATIONS_ADMIN")
+                                        .requestMatchers(
                                                 HttpMethod.POST, "/api/v1/telemetry-batches")
                                         .hasRole("OPERATIONS_ADMIN")
                                         .requestMatchers("/api/**")
