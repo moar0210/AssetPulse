@@ -166,6 +166,7 @@ public class SecurityConfiguration {
                                         .requestMatchers(
                                                 HttpMethod.GET,
                                                 "/api/v1/alerts",
+                                                "/api/v1/alerts/stream",
                                                 "/api/v1/alerts/{alertId}")
                                         .hasAnyRole("OPERATIONS_ADMIN", "TECHNICIAN", "VIEWER")
                                         .requestMatchers(

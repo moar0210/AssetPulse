@@ -169,7 +169,7 @@ public class ThresholdAlertRepository {
     }
 
     @Transactional
-    public void recordOccurrence(
+    public UUID recordOccurrence(
             UUID id,
             UUID organisationId,
             UUID thresholdRuleId,
@@ -189,7 +189,7 @@ public class ThresholdAlertRepository {
             throw new IllegalStateException("Tenant-owned threshold rule could not be locked");
         }
 
-        boolean recorded =
+        UUID affectedAlertId =
                 jdbcClient
                         .sql(RECORD_OCCURRENCE)
                         .param("id", id)
@@ -201,10 +201,11 @@ public class ThresholdAlertRepository {
                         .param("effectAt", effectAt.atOffset(ZoneOffset.UTC))
                         .query(UUID.class)
                         .optional()
-                        .isPresent();
-        if (!recorded) {
-            throw new IllegalStateException("Threshold alert occurrence was not recorded");
-        }
+                        .orElseThrow(
+                                () ->
+                                        new IllegalStateException(
+                                                "Threshold alert occurrence was not recorded"));
+        return affectedAlertId;
     }
 
     private static ThresholdEvaluation mapEvaluation(java.sql.ResultSet resultSet, int rowNumber)

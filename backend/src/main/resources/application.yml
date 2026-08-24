@@ -20,6 +20,9 @@ server:
         secure: ${ASSETPULSE_SESSION_COOKIE_SECURE:true}
 
 assetpulse:
+  alerts:
+    stream:
+      timeout-millis: ${ASSETPULSE_ALERT_STREAM_TIMEOUT_MILLIS:1800000}
   telemetry:
     processing:
       enabled: ${ASSETPULSE_TELEMETRY_PROCESSING_ENABLED:true}

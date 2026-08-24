@@ -23,6 +23,7 @@ import {
 } from "./api/session";
 import type { CsrfToken, LoginRequest, SessionIdentity } from "./api/session";
 import { getApiStatus } from "./api/status";
+import { AlertPanel } from "./AlertPanel";
 import { TelemetryPanel } from "./TelemetryPanel";
 import "./App.css";
 
@@ -40,6 +41,7 @@ type ApplicationState =
 
 type LoginOutcome = "authenticated" | "invalid-credentials" | "unavailable";
 type LogoutOutcome = "logged-out" | "unavailable";
+type WorkspaceView = "assets" | "alerts";
 
 type AssetListState =
   | Readonly<{ kind: "loading" }>
@@ -533,10 +535,12 @@ function AssetDetailPanel({
 
 function AuthenticatedPanel({
   identity,
+  csrfToken,
   onLogout,
   onSessionExpired,
 }: Readonly<{
   identity: SessionIdentity;
+  csrfToken: CsrfToken;
   onLogout: () => Promise<LogoutOutcome>;
   onSessionExpired: () => void;
 }>) {
@@ -548,6 +552,7 @@ function AuthenticatedPanel({
   });
   const [assetLoadAttempt, setAssetLoadAttempt] = useState(0);
   const [selectedAssetId, setSelectedAssetId] = useState<string | null>(null);
+  const [workspaceView, setWorkspaceView] = useState<WorkspaceView>("assets");
 
   useEffect(() => {
     let active = true;
@@ -600,7 +605,10 @@ function AuthenticatedPanel({
   }
 
   return (
-    <section className="session-card" aria-labelledby="page-title">
+    <section
+      className="session-card session-card--workspace"
+      aria-labelledby="page-title"
+    >
       <BrandMark />
       <p className="eyebrow">Authenticated session</p>
       <h1 id="page-title" className="welcome-title">
@@ -628,70 +636,96 @@ function AuthenticatedPanel({
 
       <p className="session-ready">Your trusted session is ready.</p>
 
-      {selectedAssetId === null ? (
-        <section className="asset-section" aria-labelledby="assets-title">
-          <div className="asset-section__heading">
-            <div>
-              <p className="eyebrow">Protected inventory</p>
-              <h2 id="assets-title">Assets</h2>
+      <nav className="workspace-navigation" aria-label="Product sections">
+        <button
+          type="button"
+          aria-current={workspaceView === "assets" ? "page" : undefined}
+          onClick={() => setWorkspaceView("assets")}
+        >
+          Assets
+        </button>
+        <button
+          type="button"
+          aria-current={workspaceView === "alerts" ? "page" : undefined}
+          onClick={() => setWorkspaceView("alerts")}
+        >
+          Alerts
+        </button>
+      </nav>
+
+      {workspaceView === "assets" &&
+        (selectedAssetId === null ? (
+          <section className="asset-section" aria-labelledby="assets-title">
+            <div className="asset-section__heading">
+              <div>
+                <p className="eyebrow">Protected inventory</p>
+                <h2 id="assets-title">Assets</h2>
+              </div>
+              {assetState.kind === "ready" && (
+                <p className="asset-count" aria-label="Asset count">
+                  {assetState.assets.length}
+                </p>
+              )}
             </div>
-            {assetState.kind === "ready" && (
-              <p className="asset-count" aria-label="Asset count">
-                {assetState.assets.length}
+
+            {assetState.kind === "loading" && (
+              <p className="asset-message" role="status" aria-live="polite">
+                Loading assets…
               </p>
             )}
-          </div>
 
-          {assetState.kind === "loading" && (
-            <p className="asset-message" role="status" aria-live="polite">
-              Loading assets…
-            </p>
-          )}
+            {assetState.kind === "ready" && assetState.assets.length === 0 && (
+              <p className="asset-message">No assets are available.</p>
+            )}
 
-          {assetState.kind === "ready" && assetState.assets.length === 0 && (
-            <p className="asset-message">No assets are available.</p>
-          )}
+            {assetState.kind === "ready" && assetState.assets.length > 0 && (
+              <ul className="asset-list">
+                {assetState.assets.map((asset) => (
+                  <li key={asset.id}>
+                    <button
+                      className="asset-row-button"
+                      type="button"
+                      aria-label={`View details for ${asset.name} (${asset.assetCode})`}
+                      onClick={() => setSelectedAssetId(asset.id)}
+                    >
+                      <span className="asset-name">{asset.name}</span>
+                      <span className="asset-row-button__meta">
+                        <code>{asset.assetCode}</code>
+                        <span aria-hidden="true">→</span>
+                      </span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
 
-          {assetState.kind === "ready" && assetState.assets.length > 0 && (
-            <ul className="asset-list">
-              {assetState.assets.map((asset) => (
-                <li key={asset.id}>
-                  <button
-                    className="asset-row-button"
-                    type="button"
-                    aria-label={`View details for ${asset.name} (${asset.assetCode})`}
-                    onClick={() => setSelectedAssetId(asset.id)}
-                  >
-                    <span className="asset-name">{asset.name}</span>
-                    <span className="asset-row-button__meta">
-                      <code>{asset.assetCode}</code>
-                      <span aria-hidden="true">→</span>
-                    </span>
-                  </button>
-                </li>
-              ))}
-            </ul>
-          )}
+            {assetState.kind === "unavailable" && (
+              <div className="asset-unavailable">
+                <p className="asset-message form-message--error" role="alert">
+                  We could not load assets. Try again.
+                </p>
+                <button
+                  className="secondary-button secondary-button--compact"
+                  type="button"
+                  onClick={() => setAssetLoadAttempt((attempt) => attempt + 1)}
+                >
+                  Retry assets
+                </button>
+              </div>
+            )}
+          </section>
+        ) : (
+          <AssetDetailPanel
+            assetId={selectedAssetId}
+            onBack={() => setSelectedAssetId(null)}
+            onSessionExpired={onSessionExpired}
+          />
+        ))}
 
-          {assetState.kind === "unavailable" && (
-            <div className="asset-unavailable">
-              <p className="asset-message form-message--error" role="alert">
-                We could not load assets. Try again.
-              </p>
-              <button
-                className="secondary-button secondary-button--compact"
-                type="button"
-                onClick={() => setAssetLoadAttempt((attempt) => attempt + 1)}
-              >
-                Retry assets
-              </button>
-            </div>
-          )}
-        </section>
-      ) : (
-        <AssetDetailPanel
-          assetId={selectedAssetId}
-          onBack={() => setSelectedAssetId(null)}
+      {workspaceView === "alerts" && (
+        <AlertPanel
+          roleCode={identity.role.code}
+          csrfToken={csrfToken}
           onSessionExpired={onSessionExpired}
         />
       )}
@@ -892,6 +926,7 @@ function App() {
     content = (
       <AuthenticatedPanel
         identity={applicationState.identity}
+        csrfToken={applicationState.csrfToken}
         onLogout={() => handleLogout(applicationState.csrfToken)}
         onSessionExpired={handleSessionExpired}
       />

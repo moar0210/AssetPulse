@@ -10,11 +10,15 @@ public class AlertCommandService {
 
     private final AlertCommandRepository commandRepository;
     private final AlertQueryRepository queryRepository;
+    private final AlertChangePublisher changePublisher;
 
     public AlertCommandService(
-            AlertCommandRepository commandRepository, AlertQueryRepository queryRepository) {
+            AlertCommandRepository commandRepository,
+            AlertQueryRepository queryRepository,
+            AlertChangePublisher changePublisher) {
         this.commandRepository = commandRepository;
         this.queryRepository = queryRepository;
+        this.changePublisher = changePublisher;
     }
 
     @Transactional
@@ -71,9 +75,14 @@ public class AlertCommandService {
                 targetStatus,
                 actorUserId,
                 transitionedAt);
-        return queryRepository
-                .findByOrganisationIdAndId(organisationId, alertId)
-                .orElseThrow(
-                        () -> new IllegalStateException("Transitioned alert could not be read"));
+        AlertDetailResponse response =
+                queryRepository
+                        .findByOrganisationIdAndId(organisationId, alertId)
+                        .orElseThrow(
+                                () ->
+                                        new IllegalStateException(
+                                                "Transitioned alert could not be read"));
+        changePublisher.publishAfterCommit(organisationId, alertId, AlertChangeType.STATUS_CHANGED);
+        return response;
     }
 }

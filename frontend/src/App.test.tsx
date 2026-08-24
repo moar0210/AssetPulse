@@ -66,11 +66,119 @@ const assetDetail = {
   ],
 } as const;
 
+const alertId = "50000000-0000-0000-0000-000000000001";
+const alertContext = {
+  asset: assets[0],
+  sensor: {
+    id: "30000000-0000-0000-0000-000000000001",
+    sensorKey: "PUMP-101-TEMP",
+    name: "Bearing Temperature",
+    measurementType: "TEMPERATURE",
+    unit: "CELSIUS",
+  },
+  thresholdRule: {
+    id: "40000000-0000-0000-0000-000000000001",
+    ruleCode: "PUMP-101-HIGH-TEMP",
+    name: "High bearing temperature",
+    comparison: "GREATER_THAN_OR_EQUAL_TO",
+    thresholdValue: 80,
+    cooldownSeconds: 300,
+  },
+} as const;
+const alertSummary = {
+  id: alertId,
+  status: "OPEN",
+  occurrenceCount: 3,
+  lastOccurredAt: "2026-08-23T10:03:00Z",
+  context: alertContext,
+} as const;
+const openAlertDetail = {
+  ...alertSummary,
+  firstOccurredAt: "2026-08-23T10:01:00Z",
+  cooldownUntil: "2026-08-23T10:08:00Z",
+  createdAt: "2026-08-23T10:01:01Z",
+  updatedAt: "2026-08-23T10:03:01Z",
+  history: [],
+} as const;
+const acknowledgedAlertDetail = {
+  ...openAlertDetail,
+  status: "ACKNOWLEDGED",
+  updatedAt: "2026-08-23T10:04:00Z",
+  history: [
+    {
+      sequenceNumber: 1,
+      fromStatus: "OPEN",
+      toStatus: "ACKNOWLEDGED",
+      actor: {
+        id: identity.userId,
+        displayName: identity.displayName,
+      },
+      transitionedAt: "2026-08-23T10:04:00Z",
+    },
+  ],
+} as const;
+
 function jsonResponse(payload: unknown, status = 200) {
   return new Response(JSON.stringify(payload), {
     status,
     headers: { "Content-Type": "application/json" },
   });
+}
+
+function problemResponse(code: string, status: number) {
+  return new Response(
+    JSON.stringify({
+      type: `urn:assetpulse:problem:${code.toLowerCase()}`,
+      title: "Request rejected",
+      status,
+      detail: "The request was rejected.",
+      instance: "/api/v1/alerts",
+      code,
+      correlationId: "correlation-id",
+    }),
+    {
+      status,
+      headers: { "Content-Type": "application/problem+json" },
+    },
+  );
+}
+
+class ControllableEventSource {
+  readonly close = vi.fn();
+  readonly url: string;
+  readonly eventSourceInit: EventSourceInit;
+  private readonly listeners = new Map<string, Set<EventListener>>();
+
+  constructor(url: string, eventSourceInit: EventSourceInit) {
+    this.url = url;
+    this.eventSourceInit = eventSourceInit;
+  }
+
+  addEventListener(type: string, listener: EventListenerOrEventListenerObject) {
+    const listeners = this.listeners.get(type) ?? new Set<EventListener>();
+    listeners.add(listener as EventListener);
+    this.listeners.set(type, listeners);
+  }
+
+  emit(type: string, data?: unknown) {
+    const event =
+      data === undefined
+        ? new Event(type)
+        : new MessageEvent(type, { data: JSON.stringify(data) });
+    this.listeners.get(type)?.forEach((listener) => listener(event));
+  }
+}
+
+function installEventSource() {
+  const sources: ControllableEventSource[] = [];
+  class EventSourceStub extends ControllableEventSource {
+    constructor(url: string | URL, eventSourceInit: EventSourceInit = {}) {
+      super(String(url), eventSourceInit);
+      sources.push(this);
+    }
+  }
+  vi.stubGlobal("EventSource", EventSourceStub);
+  return sources;
 }
 
 function installFetch(
@@ -176,6 +284,122 @@ describe("seeded session application", () => {
     expect(await screen.findByText("Boiler Feed Pump")).toBeInTheDocument();
     expect(screen.getByText("PUMP-101")).toBeInTheDocument();
     expect(screen.getByText("Cooling Water Pump")).toBeInTheDocument();
+  });
+
+  it("opens the authenticated alert queue and wires App-held CSRF to commands", async () => {
+    const sources = installEventSource();
+    const fetchMock = installFetch(async (url, init) => {
+      if (url === "/api/v1/status") {
+        return statusResponse();
+      }
+      if (url === "/api/v1/session/csrf") {
+        return jsonResponse(csrfToken);
+      }
+      if (url === "/api/v1/alerts?limit=50") {
+        return jsonResponse({ alerts: [alertSummary], limit: 50 });
+      }
+      if (url === `/api/v1/alerts/${alertId}/acknowledge`) {
+        expect(init?.method).toBe("POST");
+        return jsonResponse(acknowledgedAlertDetail);
+      }
+      if (url === `/api/v1/alerts/${alertId}`) {
+        return jsonResponse(openAlertDetail);
+      }
+      return jsonResponse(identity);
+    });
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Alerts" }));
+    expect(
+      await screen.findByRole("heading", { name: "Alerts" }),
+    ).toBeVisible();
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: /view open alert for boiler feed pump/i,
+      }),
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Acknowledge alert" }),
+    );
+
+    expect(await screen.findByText("Alert acknowledged.")).toBeVisible();
+    const commandCall = fetchMock.mock.calls.find(
+      ([url]) => url === `/api/v1/alerts/${alertId}/acknowledge`,
+    );
+    expect(commandCall?.[1]?.headers).toEqual(
+      expect.objectContaining({ "X-CSRF-TOKEN": "csrf-token-1" }),
+    );
+    expect(sources).toHaveLength(1);
+    expect(sources[0]?.url).toBe("/api/v1/alerts/stream");
+    expect(sources[0]?.eventSourceInit).toEqual({ withCredentials: true });
+
+    fireEvent.click(screen.getByRole("button", { name: "Assets" }));
+    expect(
+      await screen.findByRole("heading", { name: "Assets" }),
+    ).toBeVisible();
+    expect(sources[0]?.close).toHaveBeenCalledOnce();
+  });
+
+  it("rediscovers authoritative session and CSRF after command verification fails", async () => {
+    const sources = installEventSource();
+    let csrfRequests = 0;
+    let sessionReads = 0;
+    const fetchMock = installFetch(async (url) => {
+      if (url === "/api/v1/status") {
+        return statusResponse();
+      }
+      if (url === "/api/v1/session/csrf") {
+        csrfRequests += 1;
+        return jsonResponse({
+          ...csrfToken,
+          token: `csrf-token-${csrfRequests}`,
+        });
+      }
+      if (url === "/api/v1/session") {
+        sessionReads += 1;
+        return jsonResponse(identity);
+      }
+      if (url === "/api/v1/alerts?limit=50") {
+        return jsonResponse({ alerts: [alertSummary], limit: 50 });
+      }
+      if (url === `/api/v1/alerts/${alertId}/acknowledge`) {
+        return problemResponse("CSRF_REJECTED", 403);
+      }
+      if (url === `/api/v1/alerts/${alertId}`) {
+        return jsonResponse(openAlertDetail);
+      }
+      return jsonResponse(identity);
+    });
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Alerts" }));
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: /view open alert for boiler feed pump/i,
+      }),
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Acknowledge alert" }),
+    );
+
+    await waitFor(() => {
+      expect(csrfRequests).toBe(2);
+      expect(sessionReads).toBe(2);
+    });
+    expect(
+      screen.getByRole("heading", { name: "Welcome, Nora Admin" }),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: "Assets", current: "page" }),
+    ).toBeVisible();
+    expect(sources[0]?.close).toHaveBeenCalledOnce();
+
+    const commandCall = fetchMock.mock.calls.find(
+      ([url]) => url === `/api/v1/alerts/${alertId}/acknowledge`,
+    );
+    expect(commandCall?.[1]?.headers).toEqual(
+      expect.objectContaining({ "X-CSRF-TOKEN": "csrf-token-1" }),
+    );
   });
 
   it("shows asset loading without hiding trusted identity or sign-out", async () => {
