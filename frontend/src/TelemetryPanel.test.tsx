@@ -27,6 +27,12 @@ function jsonResponse(payload: unknown, status = 200) {
   });
 }
 
+function formattedCelsius(value: number) {
+  return `${new Intl.NumberFormat(undefined, {
+    maximumFractionDigits: 6,
+  }).format(value)} °C`;
+}
+
 function range(readings: readonly unknown[], sensorId = SENSOR.id) {
   return {
     sensorId,
@@ -77,8 +83,8 @@ describe("TelemetryPanel", () => {
     const tableRegion = screen.getByRole("region", {
       name: "Recent readings for Pump casing temperature",
     });
-    expect(table).toHaveTextContent("71.5 °C");
-    expect(table).toHaveTextContent("83.25 °C");
+    expect(table).toHaveTextContent(formattedCelsius(71.5));
+    expect(table).toHaveTextContent(formattedCelsius(83.25));
     expect(table.querySelectorAll("tbody tr")).toHaveLength(2);
     expect(table.querySelector("time")).toHaveAttribute(
       "datetime",
@@ -236,7 +242,7 @@ describe("TelemetryPanel", () => {
       await screen.findByRole("table", {
         name: "Recent readings for Pump casing temperature",
       }),
-    ).toHaveTextContent("71.5 °C");
+    ).toHaveTextContent(formattedCelsius(71.5));
     expect(
       screen
         .getByRole("img", { name: /Recent readings/ })

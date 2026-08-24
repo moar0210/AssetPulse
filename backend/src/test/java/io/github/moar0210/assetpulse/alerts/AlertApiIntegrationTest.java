@@ -9,6 +9,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.request;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import com.fasterxml.jackson.databind.JsonNode;
@@ -54,6 +55,7 @@ import org.testcontainers.utility.DockerImageName;
 class AlertApiIntegrationTest {
 
     private static final String ALERTS_PATH = "/api/v1/alerts";
+    private static final String ALERT_STREAM_PATH = ALERTS_PATH + "/stream";
     private static final String SESSION_PATH = "/api/v1/session";
     private static final String CSRF_PATH = SESSION_PATH + "/csrf";
     private static final String DEMO_PASSWORD = "AssetPulse1!";
@@ -105,11 +107,82 @@ class AlertApiIntegrationTest {
     @Autowired private ObjectMapper objectMapper;
     @Autowired private JdbcClient jdbcClient;
     @Autowired private AlertCommandService commandService;
+    @Autowired private AlertStreamService streamService;
 
     @BeforeEach
     void clearAlertsAndImmutableHistory() {
+        streamService.closeAll();
         jdbcClient.sql("TRUNCATE TABLE alert_status_history").update();
         jdbcClient.sql("DELETE FROM alert").update();
+    }
+
+    @ParameterizedTest
+    @MethodSource("seededNorthstarRoles")
+    void everySeededRoleCanOpenTheTenantScopedAlertStream(String email) throws Exception {
+        MvcResult stream =
+                mockMvc.perform(
+                                get(ALERT_STREAM_PATH)
+                                        .session(login(email).session())
+                                        .queryParam("organisationId", RIVERSIDE_ID.toString())
+                                        .header("X-Organisation-ID", RIVERSIDE_ID.toString())
+                                        .header("X-Role", "OPERATIONS_ADMIN")
+                                        .accept(MediaType.TEXT_EVENT_STREAM))
+                        .andExpect(status().isOk())
+                        .andExpect(request().asyncStarted())
+                        .andExpect(content().contentTypeCompatibleWith(MediaType.TEXT_EVENT_STREAM))
+                        .andExpect(header().string("Cache-Control", "no-store"))
+                        .andExpect(header().string("X-Accel-Buffering", "no"))
+                        .andReturn();
+
+        assertThat(stream.getResponse().getContentAsString()).isEqualTo("event:ready\ndata:{}\n\n");
+        assertThat(streamService.subscriberCount(NORTHSTAR_ID)).isOne();
+        assertThat(streamService.subscriberCount(RIVERSIDE_ID)).isZero();
+        streamService.closeAll();
+    }
+
+    @Test
+    void anonymousUsersCannotOpenTheAlertStream() throws Exception {
+        mockMvc.perform(get(ALERT_STREAM_PATH).accept(MediaType.TEXT_EVENT_STREAM))
+                .andExpect(status().isUnauthorized())
+                .andExpect(request().asyncNotStarted())
+                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
+                .andExpect(jsonPath("$.code").value("AUTHENTICATION_REQUIRED"));
+
+        assertThat(streamService.subscriberCount(NORTHSTAR_ID)).isZero();
+        assertThat(streamService.subscriberCount(RIVERSIDE_ID)).isZero();
+    }
+
+    @Test
+    void aCommittedStatusChangeInvalidatesOnlyTheMatchingTenantStream() throws Exception {
+        insertNorthstarAlert(AlertStatus.OPEN);
+        AuthenticatedSession northstarAdmin = login("admin@northstar.example");
+        MvcResult northstarStream = openStream(northstarAdmin.session());
+        MvcResult riversideStream = openStream(login("admin@riverside.example").session());
+
+        try {
+            mockMvc.perform(command(northstarAdmin, NORTHSTAR_ALERT_ID, "acknowledge"))
+                    .andExpect(status().isOk());
+
+            String expectedChange =
+                    "event:alert-changed\ndata:{\"alertId\":\""
+                            + NORTHSTAR_ALERT_ID
+                            + "\",\"changeType\":\"STATUS_CHANGED\"}\n\n";
+            awaitStreamContains(northstarStream, expectedChange);
+            assertThat(northstarStream.getResponse().getContentAsString())
+                    .containsOnlyOnce(expectedChange)
+                    .doesNotContain("organisationId")
+                    .doesNotContain(NORTHSTAR_FINGERPRINT)
+                    .doesNotContain("telemetry");
+            assertThat(riversideStream.getResponse().getContentAsString())
+                    .isEqualTo("event:ready\ndata:{}\n\n");
+
+            mockMvc.perform(command(northstarAdmin, NORTHSTAR_ALERT_ID, "acknowledge"))
+                    .andExpect(status().isConflict());
+            assertThat(northstarStream.getResponse().getContentAsString())
+                    .containsOnlyOnce(expectedChange);
+        } finally {
+            streamService.closeAll();
+        }
     }
 
     @Test
@@ -626,6 +699,29 @@ class AlertApiIntegrationTest {
                         .andExpect(header().string("Cache-Control", "no-store"))
                         .andReturn();
         return objectMapper.readTree(result.getResponse().getContentAsString());
+    }
+
+    private MvcResult openStream(MockHttpSession session) throws Exception {
+        MvcResult result =
+                mockMvc.perform(
+                                get(ALERT_STREAM_PATH)
+                                        .session(session)
+                                        .accept(MediaType.TEXT_EVENT_STREAM))
+                        .andExpect(status().isOk())
+                        .andExpect(request().asyncStarted())
+                        .andReturn();
+        assertThat(result.getResponse().getContentAsString()).isEqualTo("event:ready\ndata:{}\n\n");
+        return result;
+    }
+
+    private void awaitStreamContains(MvcResult result, String expected) throws Exception {
+        for (int attempt = 0; attempt < 200; attempt++) {
+            if (result.getResponse().getContentAsString().contains(expected)) {
+                return;
+            }
+            Thread.sleep(10);
+        }
+        assertThat(result.getResponse().getContentAsString()).contains(expected);
     }
 
     private JsonNode detail(MockHttpSession session, UUID alertId) throws Exception {

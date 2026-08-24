@@ -3,7 +3,12 @@ package io.github.moar0210.assetpulse.alerts;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.tuple;
+import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.authentication;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.request;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import io.github.moar0210.assetpulse.identity.AuthenticatedActor;
 import io.github.moar0210.assetpulse.telemetry.TelemetryProcessingClaim;
 import io.github.moar0210.assetpulse.telemetry.TelemetryProcessingEventHandler;
 import io.github.moar0210.assetpulse.telemetry.TelemetryProcessingEventRepository;
@@ -11,6 +16,7 @@ import io.github.moar0210.assetpulse.telemetry.TelemetryProcessingExecutionServi
 import io.github.moar0210.assetpulse.telemetry.TelemetryProcessingFailureDisposition;
 import io.github.moar0210.assetpulse.telemetry.TelemetryProcessingLifecycleService;
 import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.Instant;
@@ -25,11 +31,16 @@ import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.simple.JdbcClient;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.MvcResult;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
@@ -37,8 +48,12 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
 @SpringBootTest
+@AutoConfigureMockMvc
 @Testcontainers
 class ThresholdAlertHandlerIntegrationTest {
+
+    private static final String ALERT_STREAM_PATH = "/api/v1/alerts/stream";
+    private static final String READY_EVENT = "event:ready\ndata:{}\n\n";
 
     private static final UUID NORTHSTAR_ID =
             UUID.fromString("00000000-0000-0000-0000-000000000001");
@@ -76,16 +91,114 @@ class ThresholdAlertHandlerIntegrationTest {
     @Autowired private ThresholdAlertRepository alertRepository;
     @Autowired private ThresholdAlertHandler handler;
     @Autowired private AlertCommandService commandService;
+    @Autowired private AlertStreamService streamService;
+    @Autowired private MockMvc mockMvc;
     @Autowired private TransactionTemplate transactionTemplate;
 
     @BeforeEach
     void resetTelemetryAndAlerts() {
+        streamService.closeAll();
         jdbcClient.sql("TRUNCATE TABLE alert_status_history").update();
         jdbcClient.sql("DELETE FROM alert").update();
         jdbcClient.sql("DELETE FROM telemetry_processing_event").update();
         jdbcClient.sql("DELETE FROM telemetry_reading").update();
         jdbcClient.sql("DELETE FROM telemetry_batch").update();
         jdbcClient.sql("UPDATE threshold_rule SET enabled = TRUE").update();
+    }
+
+    @Test
+    void thresholdInvalidationIsTenantScopedAfterCommitAndSilentBelowThresholdAndOnRollback()
+            throws Exception {
+        MvcResult northstarStream = openStream(NORTHSTAR_ID);
+        MvcResult riversideStream = openStream(RIVERSIDE_ID);
+
+        try {
+            EventFixture below =
+                    createPendingEvent(
+                            "stream-below-threshold",
+                            FIRST_EVENT_AT,
+                            new ReadingFixture(
+                                    NORTHSTAR_SENSOR_ID,
+                                    new BigDecimal("79.999999"),
+                                    FIRST_OBSERVED_AT));
+            process(below, "worker-stream-below", FIRST_CLAIM_AT);
+
+            assertStreamRemains(northstarStream, READY_EVENT);
+            assertStreamRemains(riversideStream, READY_EVENT);
+
+            EventFixture committed =
+                    createPendingEvent(
+                            "stream-committed-threshold",
+                            FIRST_EVENT_AT.plusSeconds(1),
+                            new ReadingFixture(
+                                    NORTHSTAR_SENSOR_ID,
+                                    new BigDecimal("90.000000"),
+                                    FIRST_OBSERVED_AT.plusSeconds(1)));
+            TelemetryProcessingClaim committedClaim =
+                    lifecycleService
+                            .claimNext("worker-stream-commit", FIRST_CLAIM_AT.plusSeconds(1))
+                            .orElseThrow();
+            assertThat(committedClaim.event().id()).isEqualTo(committed.eventId());
+
+            assertThat(
+                            executionService.execute(
+                                    committedClaim,
+                                    event -> {
+                                        handler.handle(event);
+                                        assertThat(streamContent(northstarStream))
+                                                .isEqualTo(READY_EVENT);
+                                    }))
+                    .isTrue();
+
+            AlertRow committedAlert = readOnlyAlert();
+            String committedChange =
+                    "event:alert-changed\ndata:{\"alertId\":\""
+                            + committedAlert.id()
+                            + "\",\"changeType\":\"OCCURRENCE_RECORDED\"}\n\n";
+            awaitStreamContains(northstarStream, committedChange);
+            assertThat(streamContent(northstarStream))
+                    .isEqualTo(READY_EVENT + committedChange)
+                    .doesNotContain("organisationId")
+                    .doesNotContain("fingerprint")
+                    .doesNotContain("telemetry");
+            assertStreamRemains(riversideStream, READY_EVENT);
+
+            EventFixture rolledBack =
+                    createPendingEvent(
+                            "stream-rolled-back-threshold",
+                            FIRST_EVENT_AT.plusSeconds(2),
+                            new ReadingFixture(
+                                    NORTHSTAR_SENSOR_ID,
+                                    new BigDecimal("91.000000"),
+                                    FIRST_OBSERVED_AT.plusSeconds(2)));
+            TelemetryProcessingClaim rolledBackClaim =
+                    lifecycleService
+                            .claimNext("worker-stream-rollback", FIRST_CLAIM_AT.plusSeconds(2))
+                            .orElseThrow();
+            assertThat(rolledBackClaim.event().id()).isEqualTo(rolledBack.eventId());
+            String contentBeforeRollback = streamContent(northstarStream);
+
+            assertThatThrownBy(
+                            () ->
+                                    executionService.execute(
+                                            rolledBackClaim,
+                                            event -> {
+                                                handler.handle(event);
+                                                assertThat(streamContent(northstarStream))
+                                                        .isEqualTo(contentBeforeRollback);
+                                                throw new IllegalStateException(
+                                                        "forced post-effect rollback");
+                                            }))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessage("forced post-effect rollback");
+
+            assertStreamRemains(northstarStream, contentBeforeRollback);
+            assertStreamRemains(riversideStream, READY_EVENT);
+            assertThat(readOnlyAlert().occurrenceCount()).isOne();
+            assertThat(readEventStatus(rolledBack.eventId())).isEqualTo("PROCESSING");
+        } finally {
+            streamService.closeAll();
+        }
     }
 
     @Test
@@ -754,6 +867,56 @@ class ThresholdAlertHandlerIntegrationTest {
 
         jdbcClient.sql("DELETE FROM alert").update();
         assertThat(countAlerts()).isZero();
+    }
+
+    private MvcResult openStream(UUID organisationId) throws Exception {
+        AuthenticatedActor actor =
+                new AuthenticatedActor(
+                        UUID.randomUUID(),
+                        "stream-viewer@example.test",
+                        "Stream Viewer",
+                        "unused-password",
+                        organisationId,
+                        "stream-organisation",
+                        "Stream Organisation",
+                        "VIEWER",
+                        "Viewer");
+        UsernamePasswordAuthenticationToken authentication =
+                UsernamePasswordAuthenticationToken.authenticated(
+                        actor, null, actor.getAuthorities());
+        MvcResult result =
+                mockMvc.perform(
+                                get(ALERT_STREAM_PATH)
+                                        .with(authentication(authentication))
+                                        .accept(MediaType.TEXT_EVENT_STREAM))
+                        .andExpect(status().isOk())
+                        .andExpect(request().asyncStarted())
+                        .andReturn();
+        assertThat(streamContent(result)).isEqualTo(READY_EVENT);
+        return result;
+    }
+
+    private void awaitStreamContains(MvcResult result, String expected)
+            throws InterruptedException {
+        for (int attempt = 0; attempt < 200; attempt++) {
+            if (streamContent(result).contains(expected)) {
+                return;
+            }
+            Thread.sleep(10);
+        }
+        assertThat(streamContent(result)).contains(expected);
+    }
+
+    private void assertStreamRemains(MvcResult result, String expected)
+            throws InterruptedException {
+        for (int attempt = 0; attempt < 25; attempt++) {
+            assertThat(streamContent(result)).isEqualTo(expected);
+            Thread.sleep(10);
+        }
+    }
+
+    private String streamContent(MvcResult result) {
+        return new String(result.getResponse().getContentAsByteArray(), StandardCharsets.UTF_8);
     }
 
     private void process(EventFixture fixture, String owner, Instant claimedAt) {

@@ -12,6 +12,7 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 @RestController
 @RequestMapping("/api/v1/alerts")
@@ -19,10 +20,23 @@ public class AlertController {
 
     private final AlertQueryService queryService;
     private final AlertCommandService commandService;
+    private final AlertStreamService streamService;
 
-    public AlertController(AlertQueryService queryService, AlertCommandService commandService) {
+    public AlertController(
+            AlertQueryService queryService,
+            AlertCommandService commandService,
+            AlertStreamService streamService) {
         this.queryService = queryService;
         this.commandService = commandService;
+        this.streamService = streamService;
+    }
+
+    @GetMapping(path = "/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public ResponseEntity<SseEmitter> stream(@AuthenticationPrincipal AuthenticatedActor actor) {
+        return ResponseEntity.ok()
+                .cacheControl(CacheControl.noStore())
+                .header("X-Accel-Buffering", "no")
+                .body(streamService.subscribe(actor.organisationId()));
     }
 
     @GetMapping(produces = MediaType.APPLICATION_JSON_VALUE)
