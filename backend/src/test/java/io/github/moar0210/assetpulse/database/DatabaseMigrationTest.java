@@ -54,7 +54,7 @@ class DatabaseMigrationTest {
         }
 
         assertThat(firstState)
-                .isEqualTo(new DatabaseState("10", 10, 2, 3, 4, 3, 3, 3, 0, 0, 0, 0, 0));
+                .isEqualTo(new DatabaseState("11", 11, 2, 3, 4, 3, 3, 3, 0, 0, 0, 0, 0));
         assertThat(firstSeedRows).hasSize(18);
     }
 
@@ -346,12 +346,18 @@ class DatabaseMigrationTest {
                                                   AND indexdef LIKE '%(lease_expires_at, created_at, id)%'
                                                   AND indexdef LIKE '%WHERE%PROCESSING%'
                                               )
+                                              OR (
+                                                  indexname = 'ix_telemetry_processing_event_dead_organisation_time_id'
+                                                  AND indexdef LIKE '%(organisation_id, dead_at DESC, id)%'
+                                                  AND indexdef LIKE '%WHERE%DEAD%'
+                                              )
                                           )
                                         ORDER BY indexname
                                         """)
                                 .query(String.class)
                                 .list())
                 .containsExactly(
+                        "ix_telemetry_processing_event_dead_organisation_time_id",
                         "ix_telemetry_processing_event_due_work",
                         "ix_telemetry_processing_event_expired_lease");
 

@@ -24,6 +24,7 @@ import {
 import type { CsrfToken, LoginRequest, SessionIdentity } from "./api/session";
 import { getApiStatus } from "./api/status";
 import { AlertPanel } from "./AlertPanel";
+import { OperationsPanel } from "./OperationsPanel";
 import { TelemetryPanel } from "./TelemetryPanel";
 import "./App.css";
 
@@ -41,7 +42,7 @@ type ApplicationState =
 
 type LoginOutcome = "authenticated" | "invalid-credentials" | "unavailable";
 type LogoutOutcome = "logged-out" | "unavailable";
-type WorkspaceView = "assets" | "alerts";
+type WorkspaceView = "assets" | "alerts" | "operations";
 
 type AssetListState =
   | Readonly<{ kind: "loading" }>
@@ -651,6 +652,15 @@ function AuthenticatedPanel({
         >
           Alerts
         </button>
+        {identity.role.code === "OPERATIONS_ADMIN" && (
+          <button
+            type="button"
+            aria-current={workspaceView === "operations" ? "page" : undefined}
+            onClick={() => setWorkspaceView("operations")}
+          >
+            Operations
+          </button>
+        )}
       </nav>
 
       {workspaceView === "assets" &&
@@ -729,6 +739,14 @@ function AuthenticatedPanel({
           onSessionExpired={onSessionExpired}
         />
       )}
+
+      {workspaceView === "operations" &&
+        identity.role.code === "OPERATIONS_ADMIN" && (
+          <OperationsPanel
+            csrfToken={csrfToken}
+            onSessionExpired={onSessionExpired}
+          />
+        )}
 
       {logoutState === "error" && (
         <p className="form-message form-message--error" role="alert">

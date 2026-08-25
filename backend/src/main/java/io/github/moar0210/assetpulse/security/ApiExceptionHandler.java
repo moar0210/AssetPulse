@@ -7,8 +7,11 @@ import io.github.moar0210.assetpulse.assets.AssetNotFoundException;
 import io.github.moar0210.assetpulse.identity.AlreadyAuthenticatedException;
 import io.github.moar0210.assetpulse.identity.AuthenticationFailedException;
 import io.github.moar0210.assetpulse.identity.AuthenticationUnavailableException;
+import io.github.moar0210.assetpulse.telemetry.InvalidProcessingEventQueryException;
 import io.github.moar0210.assetpulse.telemetry.InvalidSensorReferenceException;
 import io.github.moar0210.assetpulse.telemetry.InvalidTelemetryRangeException;
+import io.github.moar0210.assetpulse.telemetry.ProcessingEventNotFoundException;
+import io.github.moar0210.assetpulse.telemetry.ProcessingEventStateConflictException;
 import io.github.moar0210.assetpulse.telemetry.SensorNotFoundException;
 import io.github.moar0210.assetpulse.telemetry.TelemetryIdempotencyConflictException;
 import jakarta.servlet.http.HttpServletRequest;
@@ -103,6 +106,36 @@ public class ApiExceptionHandler {
                 "INVALID_ALERT_QUERY",
                 "Invalid alert query",
                 "Provide a valid alert result limit from 1 to 100.");
+    }
+
+    @ExceptionHandler(ProcessingEventNotFoundException.class)
+    ResponseEntity<ProblemDetail> processingEventNotFound(HttpServletRequest request) {
+        return problem(
+                request,
+                HttpStatus.NOT_FOUND,
+                "PROCESSING_EVENT_NOT_FOUND",
+                "Processing event not found",
+                "The requested processing event does not exist or is not accessible.");
+    }
+
+    @ExceptionHandler(ProcessingEventStateConflictException.class)
+    ResponseEntity<ProblemDetail> processingEventStateConflict(HttpServletRequest request) {
+        return problem(
+                request,
+                HttpStatus.CONFLICT,
+                "PROCESSING_EVENT_STATE_CONFLICT",
+                "Processing event state conflict",
+                "The processing event cannot be retried from its current state.");
+    }
+
+    @ExceptionHandler(InvalidProcessingEventQueryException.class)
+    ResponseEntity<ProblemDetail> invalidProcessingEventQuery(HttpServletRequest request) {
+        return problem(
+                request,
+                HttpStatus.BAD_REQUEST,
+                "INVALID_PROCESSING_EVENT_QUERY",
+                "Invalid processing event query",
+                "Provide a valid processing event result limit from 1 to 100.");
     }
 
     @ExceptionHandler(SensorNotFoundException.class)

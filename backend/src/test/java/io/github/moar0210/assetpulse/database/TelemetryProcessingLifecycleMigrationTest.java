@@ -90,6 +90,33 @@ class TelemetryProcessingLifecycleMigrationTest {
                                         SELECT COUNT(*)::integer
                                         FROM flyway_schema_history
                                         WHERE success
+                                          AND version = '11'
+                                        """)
+                                .query(Integer.class)
+                                .single())
+                .isOne();
+        assertThat(
+                        jdbcClient
+                                .sql(
+                                        """
+                                        SELECT COUNT(*)::integer
+                                        FROM pg_indexes
+                                        WHERE schemaname = 'public'
+                                          AND tablename = 'telemetry_processing_event'
+                                          AND indexname = 'ix_telemetry_processing_event_dead_organisation_time_id'
+                                          AND indexdef LIKE '%(organisation_id, dead_at DESC, id)%'
+                                          AND indexdef LIKE '%WHERE%DEAD%'
+                                        """)
+                                .query(Integer.class)
+                                .single())
+                .isOne();
+        assertThat(
+                        jdbcClient
+                                .sql(
+                                        """
+                                        SELECT COUNT(*)::integer
+                                        FROM flyway_schema_history
+                                        WHERE success
                                           AND version = '9'
                                         """)
                                 .query(Integer.class)
