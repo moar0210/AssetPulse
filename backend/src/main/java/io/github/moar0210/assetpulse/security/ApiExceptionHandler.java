@@ -7,10 +7,19 @@ import io.github.moar0210.assetpulse.assets.AssetNotFoundException;
 import io.github.moar0210.assetpulse.identity.AlreadyAuthenticatedException;
 import io.github.moar0210.assetpulse.identity.AuthenticationFailedException;
 import io.github.moar0210.assetpulse.identity.AuthenticationUnavailableException;
+import io.github.moar0210.assetpulse.telemetry.InvalidProcessingEventQueryException;
 import io.github.moar0210.assetpulse.telemetry.InvalidSensorReferenceException;
 import io.github.moar0210.assetpulse.telemetry.InvalidTelemetryRangeException;
+import io.github.moar0210.assetpulse.telemetry.ProcessingEventNotFoundException;
+import io.github.moar0210.assetpulse.telemetry.ProcessingEventStateConflictException;
 import io.github.moar0210.assetpulse.telemetry.SensorNotFoundException;
 import io.github.moar0210.assetpulse.telemetry.TelemetryIdempotencyConflictException;
+import io.github.moar0210.assetpulse.workorders.InvalidWorkOrderAssigneeException;
+import io.github.moar0210.assetpulse.workorders.InvalidWorkOrderQueryException;
+import io.github.moar0210.assetpulse.workorders.WorkOrderAlreadyExistsException;
+import io.github.moar0210.assetpulse.workorders.WorkOrderNotFoundException;
+import io.github.moar0210.assetpulse.workorders.WorkOrderSourceAlertNotFoundException;
+import io.github.moar0210.assetpulse.workorders.WorkOrderStateConflictException;
 import jakarta.servlet.http.HttpServletRequest;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -103,6 +112,96 @@ public class ApiExceptionHandler {
                 "INVALID_ALERT_QUERY",
                 "Invalid alert query",
                 "Provide a valid alert result limit from 1 to 100.");
+    }
+
+    @ExceptionHandler(WorkOrderAlreadyExistsException.class)
+    ResponseEntity<ProblemDetail> workOrderAlreadyExists(HttpServletRequest request) {
+        return problem(
+                request,
+                HttpStatus.CONFLICT,
+                "WORK_ORDER_ALREADY_EXISTS",
+                "Work order already exists",
+                "The source alert already has a work order.");
+    }
+
+    @ExceptionHandler(WorkOrderSourceAlertNotFoundException.class)
+    ResponseEntity<ProblemDetail> workOrderSourceAlertNotFound(HttpServletRequest request) {
+        return problem(
+                request,
+                HttpStatus.NOT_FOUND,
+                "WORK_ORDER_SOURCE_ALERT_NOT_FOUND",
+                "Work-order source alert not found",
+                "The source alert does not exist or is not accessible.");
+    }
+
+    @ExceptionHandler(WorkOrderNotFoundException.class)
+    ResponseEntity<ProblemDetail> workOrderNotFound(HttpServletRequest request) {
+        return problem(
+                request,
+                HttpStatus.NOT_FOUND,
+                "WORK_ORDER_NOT_FOUND",
+                "Work order not found",
+                "The requested work order does not exist or is not accessible.");
+    }
+
+    @ExceptionHandler(InvalidWorkOrderAssigneeException.class)
+    ResponseEntity<ProblemDetail> invalidWorkOrderAssignee(HttpServletRequest request) {
+        return problem(
+                request,
+                HttpStatus.BAD_REQUEST,
+                "INVALID_WORK_ORDER_ASSIGNEE",
+                "Invalid work-order assignee",
+                "Select an accessible technician from the same organisation.");
+    }
+
+    @ExceptionHandler(WorkOrderStateConflictException.class)
+    ResponseEntity<ProblemDetail> workOrderStateConflict(HttpServletRequest request) {
+        return problem(
+                request,
+                HttpStatus.CONFLICT,
+                "WORK_ORDER_STATE_CONFLICT",
+                "Work-order state conflict",
+                "The work order cannot be assigned from its current state and version.");
+    }
+
+    @ExceptionHandler(InvalidWorkOrderQueryException.class)
+    ResponseEntity<ProblemDetail> invalidWorkOrderQuery(HttpServletRequest request) {
+        return problem(
+                request,
+                HttpStatus.BAD_REQUEST,
+                "INVALID_WORK_ORDER_QUERY",
+                "Invalid work-order query",
+                "Provide a valid work-order result limit from 1 to 100.");
+    }
+
+    @ExceptionHandler(ProcessingEventNotFoundException.class)
+    ResponseEntity<ProblemDetail> processingEventNotFound(HttpServletRequest request) {
+        return problem(
+                request,
+                HttpStatus.NOT_FOUND,
+                "PROCESSING_EVENT_NOT_FOUND",
+                "Processing event not found",
+                "The requested processing event does not exist or is not accessible.");
+    }
+
+    @ExceptionHandler(ProcessingEventStateConflictException.class)
+    ResponseEntity<ProblemDetail> processingEventStateConflict(HttpServletRequest request) {
+        return problem(
+                request,
+                HttpStatus.CONFLICT,
+                "PROCESSING_EVENT_STATE_CONFLICT",
+                "Processing event state conflict",
+                "The processing event cannot be retried from its current state.");
+    }
+
+    @ExceptionHandler(InvalidProcessingEventQueryException.class)
+    ResponseEntity<ProblemDetail> invalidProcessingEventQuery(HttpServletRequest request) {
+        return problem(
+                request,
+                HttpStatus.BAD_REQUEST,
+                "INVALID_PROCESSING_EVENT_QUERY",
+                "Invalid processing event query",
+                "Provide a valid processing event result limit from 1 to 100.");
     }
 
     @ExceptionHandler(SensorNotFoundException.class)

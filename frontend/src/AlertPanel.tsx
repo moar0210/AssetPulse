@@ -21,6 +21,17 @@ import type {
   AlertStatus,
 } from "./api/alerts";
 import type { CsrfToken, RoleCode } from "./api/session";
+import {
+  createWorkOrder,
+  DEFAULT_WORK_ORDER_LIMIT,
+  getWorkOrders,
+  WorkOrderAlreadyExistsError,
+  WorkOrderCommandUncertainError,
+  WorkOrderForbiddenError,
+  WorkOrderRequestVerificationError,
+  WorkOrderSessionExpiredError,
+  WorkOrderSourceAlertNotFoundError,
+} from "./api/workOrders";
 
 type AlertQueueState =
   | Readonly<{ kind: "loading" }>
@@ -47,6 +58,20 @@ type StreamState = "connecting" | "connected" | "reconnecting" | "degraded";
 type ActionState = "idle" | "submitting" | "recovering" | "recovery-failed";
 type ActionFeedback = Readonly<{
   kind: "success" | "conflict" | "uncertain" | "forbidden";
+  message: string;
+}>;
+
+type CreateActionState =
+  | "idle"
+  | "submitting"
+  | "recovering"
+  | "recovery-failed"
+  | "created"
+  | "existing"
+  | "blocked";
+type CreateRecoveryReason = "duplicate" | "uncertain";
+type CreateFeedback = Readonly<{
+  kind: "success" | "duplicate" | "uncertain" | "forbidden" | "not-found";
   message: string;
 }>;
 
@@ -113,7 +138,15 @@ function AlertDetailPanel({
   const [actionFeedback, setActionFeedback] = useState<ActionFeedback | null>(
     null,
   );
+  const [createActionState, setCreateActionState] =
+    useState<CreateActionState>("idle");
+  const [createFeedback, setCreateFeedback] = useState<CreateFeedback | null>(
+    null,
+  );
   const commandController = useRef<AbortController | null>(null);
+  const createController = useRef<AbortController | null>(null);
+  const createRecoveryController = useRef<AbortController | null>(null);
+  const createRecoveryReason = useRef<CreateRecoveryReason>("uncertain");
   const detailController = useRef<AbortController | null>(null);
   const detailRequestSequence = useRef(0);
   const detailRequestActive = useRef(false);
@@ -276,6 +309,8 @@ function AlertDetailPanel({
       mounted.current = false;
       cancelDetailRefresh();
       commandController.current?.abort();
+      createController.current?.abort();
+      createRecoveryController.current?.abort();
     };
   }, [cancelDetailRefresh, refreshDetail]);
 
@@ -411,6 +446,171 @@ function AlertDetailPanel({
       }
       if (commandController.current === controller) {
         commandController.current = null;
+      }
+    }
+  }
+
+  const recoverWorkOrderCreation = useCallback(
+    async (reason: CreateRecoveryReason) => {
+      createRecoveryReason.current = reason;
+      setCreateActionState("recovering");
+      setCreateFeedback({
+        kind: reason,
+        message:
+          reason === "duplicate"
+            ? "A work order already exists for this alert. Confirming it from the saved work-order queue."
+            : "The create result could not be confirmed. Checking the saved work-order queue before another action.",
+      });
+
+      createRecoveryController.current?.abort();
+      const controller = new AbortController();
+      createRecoveryController.current = controller;
+      const timeoutId = window.setTimeout(
+        () => controller.abort(),
+        API_TIMEOUT_MS,
+      );
+      try {
+        const result = await getWorkOrders(
+          DEFAULT_WORK_ORDER_LIMIT,
+          controller.signal,
+        );
+        if (!mounted.current || controller.signal.aborted) {
+          return;
+        }
+        const recovered = result.workOrders.find(
+          (workOrder) =>
+            workOrder.alertId.toLowerCase() === alertId.toLowerCase(),
+        );
+        if (recovered !== undefined) {
+          setCreateActionState(reason === "duplicate" ? "existing" : "created");
+          setCreateFeedback({
+            kind: reason === "duplicate" ? "duplicate" : "success",
+            message:
+              reason === "duplicate"
+                ? "This alert already has a work order. Open Work orders to inspect it."
+                : "The saved work-order queue confirms that the work order was created.",
+          });
+          return;
+        }
+        if (reason === "duplicate") {
+          // The conflict is authoritative even when the record is outside the
+          // bounded first page. Do not offer another create mutation.
+          setCreateActionState("existing");
+          setCreateFeedback({
+            kind: "duplicate",
+            message:
+              "This alert already has a work order. It is outside the current bounded queue; open Work orders to refresh and inspect it.",
+          });
+          return;
+        }
+        setCreateActionState("recovery-failed");
+        setCreateFeedback({
+          kind: "uncertain",
+          message:
+            "The create result is still uncertain because no matching work order was visible in the bounded queue. Retry authoritative recovery before creating again.",
+        });
+      } catch (error: unknown) {
+        if (!mounted.current) {
+          return;
+        }
+        if (error instanceof WorkOrderSessionExpiredError) {
+          onSessionExpired();
+          return;
+        }
+        if (error instanceof WorkOrderForbiddenError) {
+          setCreateActionState("blocked");
+          setCreateFeedback({
+            kind: "forbidden",
+            message:
+              "The server did not grant access to recover this work-order result.",
+          });
+          return;
+        }
+        setCreateActionState("recovery-failed");
+        setCreateFeedback({
+          kind: reason === "duplicate" ? "duplicate" : "uncertain",
+          message:
+            reason === "duplicate"
+              ? "A work order already exists, but the saved work-order queue could not be loaded. Open Work orders and retry there."
+              : "The create result and saved work-order queue could not be confirmed. Retry authoritative recovery before creating again.",
+        });
+      } finally {
+        window.clearTimeout(timeoutId);
+        if (createRecoveryController.current === controller) {
+          createRecoveryController.current = null;
+        }
+      }
+    },
+    [alertId, onSessionExpired],
+  );
+
+  async function handleCreateWorkOrder() {
+    if (createActionState !== "idle") {
+      return;
+    }
+    setCreateActionState("submitting");
+    setCreateFeedback(null);
+    const controller = new AbortController();
+    createController.current = controller;
+    const timeoutId = window.setTimeout(
+      () => controller.abort(),
+      API_TIMEOUT_MS,
+    );
+    try {
+      const created = await createWorkOrder(
+        alertId,
+        csrfToken,
+        controller.signal,
+      );
+      if (!mounted.current) {
+        return;
+      }
+      setCreateActionState("created");
+      setCreateFeedback({
+        kind: "success",
+        message: `Work order created. Open Work orders to inspect ${created.context.assetName}.`,
+      });
+    } catch (error: unknown) {
+      if (!mounted.current) {
+        return;
+      }
+      if (
+        error instanceof WorkOrderSessionExpiredError ||
+        error instanceof WorkOrderRequestVerificationError
+      ) {
+        onSessionExpired();
+        return;
+      }
+      if (error instanceof WorkOrderSourceAlertNotFoundError) {
+        setCreateActionState("blocked");
+        setCreateFeedback({
+          kind: "not-found",
+          message:
+            "The source alert is no longer available, so a work order cannot be created.",
+        });
+        onRefreshQueue();
+        return;
+      }
+      if (error instanceof WorkOrderForbiddenError) {
+        setCreateActionState("blocked");
+        setCreateFeedback({
+          kind: "forbidden",
+          message:
+            "The server did not grant permission to create a work order.",
+        });
+        return;
+      }
+      await recoverWorkOrderCreation(
+        error instanceof WorkOrderAlreadyExistsError
+          ? "duplicate"
+          : error instanceof WorkOrderCommandUncertainError
+            ? "uncertain"
+            : "uncertain",
+      );
+    } finally {
+      window.clearTimeout(timeoutId);
+      if (createController.current === controller) {
+        createController.current = null;
       }
     }
   }
@@ -660,6 +860,65 @@ function AlertDetailPanel({
                 )}
               </div>
             )}
+
+          {roleCode === "OPERATIONS_ADMIN" && (
+            <section
+              className="work-order-create"
+              aria-labelledby="work-order-create-title"
+            >
+              <div>
+                <h3 id="work-order-create-title">Maintenance work order</h3>
+                <p className="asset-message">
+                  Create the single work order linked to this alert.
+                </p>
+              </div>
+
+              {createFeedback !== null && (
+                <p
+                  className={`form-message work-order-create__feedback work-order-create__feedback--${createFeedback.kind}`}
+                  role={createFeedback.kind === "success" ? "status" : "alert"}
+                >
+                  {createFeedback.message}
+                </p>
+              )}
+
+              <div className="work-order-create__actions">
+                <button
+                  className="primary-button"
+                  type="button"
+                  disabled={createActionState !== "idle"}
+                  onClick={() => void handleCreateWorkOrder()}
+                >
+                  {createActionState === "submitting"
+                    ? "Creating work order…"
+                    : createActionState === "recovering"
+                      ? "Checking saved work orders…"
+                      : createActionState === "recovery-failed"
+                        ? "Authoritative check required"
+                        : createActionState === "created"
+                          ? "Work order created"
+                          : createActionState === "existing"
+                            ? "Work order already exists"
+                            : createActionState === "blocked"
+                              ? "Create unavailable"
+                              : "Create work order"}
+                </button>
+                {createActionState === "recovery-failed" && (
+                  <button
+                    className="secondary-button secondary-button--compact"
+                    type="button"
+                    onClick={() =>
+                      void recoverWorkOrderCreation(
+                        createRecoveryReason.current,
+                      )
+                    }
+                  >
+                    Retry authoritative check
+                  </button>
+                )}
+              </div>
+            </section>
+          )}
         </div>
       )}
     </section>

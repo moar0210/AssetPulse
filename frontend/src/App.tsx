@@ -24,7 +24,9 @@ import {
 import type { CsrfToken, LoginRequest, SessionIdentity } from "./api/session";
 import { getApiStatus } from "./api/status";
 import { AlertPanel } from "./AlertPanel";
+import { OperationsPanel } from "./OperationsPanel";
 import { TelemetryPanel } from "./TelemetryPanel";
+import { WorkOrderPanel } from "./WorkOrderPanel";
 import "./App.css";
 
 type ApiConnectionState = "checking" | "available" | "unavailable";
@@ -41,7 +43,7 @@ type ApplicationState =
 
 type LoginOutcome = "authenticated" | "invalid-credentials" | "unavailable";
 type LogoutOutcome = "logged-out" | "unavailable";
-type WorkspaceView = "assets" | "alerts";
+type WorkspaceView = "assets" | "alerts" | "work-orders" | "operations";
 
 type AssetListState =
   | Readonly<{ kind: "loading" }>
@@ -651,6 +653,22 @@ function AuthenticatedPanel({
         >
           Alerts
         </button>
+        <button
+          type="button"
+          aria-current={workspaceView === "work-orders" ? "page" : undefined}
+          onClick={() => setWorkspaceView("work-orders")}
+        >
+          Work orders
+        </button>
+        {identity.role.code === "OPERATIONS_ADMIN" && (
+          <button
+            type="button"
+            aria-current={workspaceView === "operations" ? "page" : undefined}
+            onClick={() => setWorkspaceView("operations")}
+          >
+            Operations
+          </button>
+        )}
       </nav>
 
       {workspaceView === "assets" &&
@@ -729,6 +747,22 @@ function AuthenticatedPanel({
           onSessionExpired={onSessionExpired}
         />
       )}
+
+      {workspaceView === "work-orders" && (
+        <WorkOrderPanel
+          identity={identity}
+          csrfToken={csrfToken}
+          onSessionExpired={onSessionExpired}
+        />
+      )}
+
+      {workspaceView === "operations" &&
+        identity.role.code === "OPERATIONS_ADMIN" && (
+          <OperationsPanel
+            csrfToken={csrfToken}
+            onSessionExpired={onSessionExpired}
+          />
+        )}
 
       {logoutState === "error" && (
         <p className="form-message form-message--error" role="alert">

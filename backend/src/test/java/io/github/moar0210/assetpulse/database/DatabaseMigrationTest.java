@@ -40,8 +40,10 @@ class DatabaseMigrationTest {
             assertSeedRelationships(jdbcClient);
             assertProcessingEventLifecycleSchema(jdbcClient);
             assertAlertSchema(jdbcClient);
+            assertWorkOrderSchema(jdbcClient);
             assertDatabaseConstraints(jdbcClient);
             assertAlertHistoryConstraints(jdbcClient);
+            assertWorkOrderConstraints(jdbcClient);
             firstState = readState(jdbcClient);
             firstSeedRows = readSeedRows(jdbcClient);
         }
@@ -54,7 +56,7 @@ class DatabaseMigrationTest {
         }
 
         assertThat(firstState)
-                .isEqualTo(new DatabaseState("10", 10, 2, 3, 4, 3, 3, 3, 0, 0, 0, 0, 0));
+                .isEqualTo(new DatabaseState("12", 12, 2, 3, 4, 3, 3, 3, 0, 0, 0, 0, 0, 0));
         assertThat(firstSeedRows).hasSize(18);
     }
 
@@ -94,7 +96,8 @@ class DatabaseMigrationTest {
                 count(jdbcClient, "SELECT COUNT(*)::integer FROM telemetry_reading"),
                 count(jdbcClient, "SELECT COUNT(*)::integer FROM telemetry_processing_event"),
                 count(jdbcClient, "SELECT COUNT(*)::integer FROM alert"),
-                count(jdbcClient, "SELECT COUNT(*)::integer FROM alert_status_history"));
+                count(jdbcClient, "SELECT COUNT(*)::integer FROM alert_status_history"),
+                count(jdbcClient, "SELECT COUNT(*)::integer FROM work_order"));
     }
 
     private List<String> readSeedRows(JdbcClient jdbcClient) {
@@ -346,12 +349,18 @@ class DatabaseMigrationTest {
                                                   AND indexdef LIKE '%(lease_expires_at, created_at, id)%'
                                                   AND indexdef LIKE '%WHERE%PROCESSING%'
                                               )
+                                              OR (
+                                                  indexname = 'ix_telemetry_processing_event_dead_organisation_time_id'
+                                                  AND indexdef LIKE '%(organisation_id, dead_at DESC, id)%'
+                                                  AND indexdef LIKE '%WHERE%DEAD%'
+                                              )
                                           )
                                         ORDER BY indexname
                                         """)
                                 .query(String.class)
                                 .list())
                 .containsExactly(
+                        "ix_telemetry_processing_event_dead_organisation_time_id",
                         "ix_telemetry_processing_event_due_work",
                         "ix_telemetry_processing_event_expired_lease");
 
@@ -539,6 +548,316 @@ class DatabaseMigrationTest {
                                 .query(String.class)
                                 .list())
                 .containsExactly("tr_alert_status_history_immutable");
+    }
+
+    private void assertWorkOrderSchema(JdbcClient jdbcClient) {
+        assertThat(
+                        jdbcClient
+                                .sql(
+                                        """
+                                        SELECT CONCAT_WS(
+                                            '|',
+                                            column_name,
+                                            data_type,
+                                            COALESCE(character_maximum_length::text, '-'),
+                                            is_nullable,
+                                            (column_default IS NOT NULL)::text
+                                        )
+                                        FROM information_schema.columns
+                                        WHERE table_schema = 'public'
+                                          AND table_name = 'work_order'
+                                        ORDER BY column_name
+                                        """)
+                                .query(String.class)
+                                .list())
+                .containsExactly(
+                        "alert_id|uuid|-|NO|false",
+                        "assigned_at|timestamp with time zone|-|YES|false",
+                        "assigned_technician_role_code|character varying|32|YES|false",
+                        "assigned_technician_user_id|uuid|-|YES|false",
+                        "created_at|timestamp with time zone|-|NO|true",
+                        "id|uuid|-|NO|false",
+                        "organisation_id|uuid|-|NO|false",
+                        "status|character varying|16|NO|true",
+                        "updated_at|timestamp with time zone|-|NO|true",
+                        "version|bigint|-|NO|true");
+
+        assertThat(
+                        jdbcClient
+                                .sql(
+                                        """
+                                        SELECT conname
+                                        FROM pg_constraint
+                                        WHERE conrelid = 'work_order'::regclass
+                                        ORDER BY conname
+                                        """)
+                                .query(String.class)
+                                .list())
+                .containsExactly(
+                        "ck_work_order_assignment_consistency",
+                        "ck_work_order_status",
+                        "ck_work_order_timestamps",
+                        "ck_work_order_version",
+                        "fk_work_order_alert",
+                        "fk_work_order_assigned_technician",
+                        "pk_work_order",
+                        "uq_work_order_organisation_alert",
+                        "uq_work_order_organisation_id");
+
+        assertThat(
+                        jdbcClient
+                                .sql(
+                                        """
+                                        SELECT indexname
+                                        FROM pg_indexes
+                                        WHERE schemaname = 'public'
+                                          AND tablename = 'work_order'
+                                          AND indexname IN (
+                                              'ix_work_order_organisation_updated_id',
+                                              'ix_work_order_organisation_assignee_updated_id'
+                                          )
+                                        ORDER BY indexname
+                                        """)
+                                .query(String.class)
+                                .list())
+                .containsExactly(
+                        "ix_work_order_organisation_assignee_updated_id",
+                        "ix_work_order_organisation_updated_id");
+
+        assertThat(
+                        jdbcClient
+                                .sql(
+                                        """
+                                        SELECT tgname
+                                        FROM pg_trigger
+                                        WHERE tgrelid = 'work_order'::regclass
+                                          AND NOT tgisinternal
+                                        """)
+                                .query(String.class)
+                                .list())
+                .containsExactly("tr_work_order_scope_immutable");
+
+        assertThat(
+                        jdbcClient
+                                .sql(
+                                        """
+                                        SELECT COUNT(*)::integer
+                                        FROM pg_constraint
+                                        WHERE conrelid = 'app_user'::regclass
+                                          AND conname = 'uq_app_user_organisation_id_role'
+                                        """)
+                                .query(Integer.class)
+                                .single())
+                .isOne();
+    }
+
+    private void assertWorkOrderConstraints(JdbcClient jdbcClient) {
+        jdbcClient
+                .sql(
+                        """
+                        INSERT INTO alert (
+                            id,
+                            organisation_id,
+                            threshold_rule_id,
+                            fingerprint,
+                            first_occurred_at,
+                            last_occurred_at,
+                            cooldown_until,
+                            created_at,
+                            updated_at
+                        )
+                        VALUES
+                            (
+                                '80000000-0000-0000-0000-000000000011',
+                                '00000000-0000-0000-0000-000000000001',
+                                '40000000-0000-0000-0000-000000000001',
+                                'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                                '2026-08-22 08:00:00+00',
+                                '2026-08-22 08:00:00+00',
+                                '2026-08-22 08:05:00+00',
+                                '2026-08-22 09:00:00+00',
+                                '2026-08-22 09:00:00+00'
+                            ),
+                            (
+                                '80000000-0000-0000-0000-000000000012',
+                                '00000000-0000-0000-0000-000000000001',
+                                '40000000-0000-0000-0000-000000000002',
+                                'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+                                '2026-08-22 08:00:00+00',
+                                '2026-08-22 08:00:00+00',
+                                '2026-08-22 08:05:00+00',
+                                '2026-08-22 09:00:00+00',
+                                '2026-08-22 09:00:00+00'
+                            ),
+                            (
+                                '80000000-0000-0000-0000-000000000013',
+                                '00000000-0000-0000-0000-000000000002',
+                                '40000000-0000-0000-0000-000000000003',
+                                'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
+                                '2026-08-22 08:00:00+00',
+                                '2026-08-22 08:00:00+00',
+                                '2026-08-22 08:05:00+00',
+                                '2026-08-22 09:00:00+00',
+                                '2026-08-22 09:00:00+00'
+                            )
+                        """)
+                .update();
+
+        jdbcClient
+                .sql(
+                        """
+                        INSERT INTO work_order (
+                            id,
+                            organisation_id,
+                            alert_id,
+                            created_at,
+                            updated_at
+                        )
+                        VALUES (
+                            '90000000-0000-0000-0000-000000000001',
+                            '00000000-0000-0000-0000-000000000001',
+                            '80000000-0000-0000-0000-000000000011',
+                            '2026-08-22 10:00:00+00',
+                            '2026-08-22 10:00:00+00'
+                        )
+                        """)
+                .update();
+
+        assertThatThrownBy(
+                        () ->
+                                jdbcClient
+                                        .sql(
+                                                """
+                                                INSERT INTO work_order (id, organisation_id, alert_id)
+                                                VALUES (
+                                                    '90000000-0000-0000-0000-000000000002',
+                                                    '00000000-0000-0000-0000-000000000002',
+                                                    '80000000-0000-0000-0000-000000000011'
+                                                )
+                                                """)
+                                        .update())
+                .isInstanceOf(DataIntegrityViolationException.class);
+        assertThatThrownBy(
+                        () ->
+                                jdbcClient
+                                        .sql(
+                                                """
+                                                UPDATE work_order
+                                                SET organisation_id = '00000000-0000-0000-0000-000000000002'
+                                                WHERE id = '90000000-0000-0000-0000-000000000001'
+                                                """)
+                                        .update())
+                .isInstanceOf(DataIntegrityViolationException.class);
+        assertThat(
+                        jdbcClient
+                                .sql(
+                                        """
+                                        SELECT CONCAT_WS('|', organisation_id, alert_id)
+                                        FROM work_order
+                                        WHERE id = '90000000-0000-0000-0000-000000000001'
+                                        """)
+                                .query(String.class)
+                                .single())
+                .isEqualTo(
+                        "00000000-0000-0000-0000-000000000001|"
+                                + "80000000-0000-0000-0000-000000000011");
+        assertThatThrownBy(
+                        () ->
+                                jdbcClient
+                                        .sql(
+                                                """
+                                                INSERT INTO work_order (id, organisation_id, alert_id)
+                                                VALUES (
+                                                    '90000000-0000-0000-0000-000000000003',
+                                                    '00000000-0000-0000-0000-000000000001',
+                                                    '80000000-0000-0000-0000-000000000011'
+                                                )
+                                                """)
+                                        .update())
+                .isInstanceOf(DataIntegrityViolationException.class);
+        assertThatThrownBy(
+                        () ->
+                                jdbcClient
+                                        .sql(
+                                                """
+                                                INSERT INTO work_order (
+                                                    id,
+                                                    organisation_id,
+                                                    alert_id,
+                                                    status,
+                                                    version,
+                                                    assigned_technician_user_id,
+                                                    assigned_technician_role_code,
+                                                    assigned_at,
+                                                    created_at,
+                                                    updated_at
+                                                )
+                                                VALUES (
+                                                    '90000000-0000-0000-0000-000000000004',
+                                                    '00000000-0000-0000-0000-000000000001',
+                                                    '80000000-0000-0000-0000-000000000012',
+                                                    'ASSIGNED',
+                                                    1,
+                                                    '10000000-0000-0000-0000-000000000001',
+                                                    'TECHNICIAN',
+                                                    '2026-08-22 10:05:00+00',
+                                                    '2026-08-22 10:00:00+00',
+                                                    '2026-08-22 10:05:00+00'
+                                                )
+                                                """)
+                                        .update())
+                .isInstanceOf(DataIntegrityViolationException.class);
+        assertThatThrownBy(
+                        () ->
+                                jdbcClient
+                                        .sql(
+                                                """
+                                                UPDATE work_order
+                                                SET alert_id = '80000000-0000-0000-0000-000000000012'
+                                                WHERE id = '90000000-0000-0000-0000-000000000001'
+                                                """)
+                                        .update())
+                .isInstanceOf(DataIntegrityViolationException.class);
+        assertThatThrownBy(
+                        () ->
+                                jdbcClient
+                                        .sql(
+                                                """
+                                                UPDATE work_order
+                                                SET status = 'ASSIGNED', version = 1
+                                                WHERE id = '90000000-0000-0000-0000-000000000001'
+                                                """)
+                                        .update())
+                .isInstanceOf(DataIntegrityViolationException.class);
+
+        assertThat(
+                        jdbcClient
+                                .sql(
+                                        """
+                                        UPDATE work_order
+                                        SET status = 'ASSIGNED',
+                                            version = 1,
+                                            assigned_technician_user_id = '10000000-0000-0000-0000-000000000002',
+                                            assigned_technician_role_code = 'TECHNICIAN',
+                                            assigned_at = '2026-08-22 10:05:00+00',
+                                            updated_at = '2026-08-22 10:05:00+00'
+                                        WHERE id = '90000000-0000-0000-0000-000000000001'
+                                        """)
+                                .update())
+                .isOne();
+
+        jdbcClient.sql("DELETE FROM work_order").update();
+        jdbcClient
+                .sql(
+                        """
+                        DELETE FROM alert
+                        WHERE id IN (
+                            '80000000-0000-0000-0000-000000000011',
+                            '80000000-0000-0000-0000-000000000012',
+                            '80000000-0000-0000-0000-000000000013'
+                        )
+                        """)
+                .update();
     }
 
     private void assertAlertHistoryConstraints(JdbcClient jdbcClient) {
@@ -1012,5 +1331,6 @@ class DatabaseMigrationTest {
             int telemetryReadings,
             int telemetryProcessingEvents,
             int alerts,
-            int alertHistoryEntries) {}
+            int alertHistoryEntries,
+            int workOrders) {}
 }

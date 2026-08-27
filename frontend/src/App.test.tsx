@@ -1037,3 +1037,89 @@ describe("seeded session application", () => {
     expect(await screen.findByText("available")).toBeInTheDocument();
   });
 });
+
+describe("operations workspace navigation", () => {
+  const processingEventId = "60000000-0000-0000-0000-000000000001";
+  const deadProcessingEvent = {
+    id: processingEventId,
+    telemetryBatchId: "70000000-0000-0000-0000-000000000001",
+    eventType: "TELEMETRY_BATCH_ACCEPTED",
+    attemptCount: 5,
+    createdAt: "2026-08-23T10:00:00Z",
+    deadAt: "2026-08-23T10:05:00Z",
+    updatedAt: "2026-08-23T10:05:01Z",
+    lastErrorCode: "PROCESSING_FAILED",
+    lastErrorMessage: "Processing failed; another attempt may be scheduled.",
+  } as const;
+
+  it("shows Operations to an admin and wires App-held CSRF to a bodyless retry", async () => {
+    let queueReads = 0;
+    const fetchMock = installFetch(async (url, init) => {
+      if (url === "/api/v1/status") {
+        return statusResponse();
+      }
+      if (url === "/api/v1/session/csrf") {
+        return jsonResponse(csrfToken);
+      }
+      if (url === "/api/v1/processing-events/dead?limit=50") {
+        queueReads += 1;
+        return jsonResponse({
+          events: queueReads === 1 ? [deadProcessingEvent] : [],
+          limit: 50,
+        });
+      }
+      if (url === `/api/v1/processing-events/${processingEventId}/retry`) {
+        expect(init?.method).toBe("POST");
+        return new Response(null, { status: 204 });
+      }
+      return jsonResponse(identity);
+    });
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Operations" }));
+    expect(
+      await screen.findByRole("heading", { name: "Processing operations" }),
+    ).toBeVisible();
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: `View dead processing event ${processingEventId}`,
+      }),
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Retry processing event" }),
+    );
+
+    expect(await screen.findByText(/Retry accepted/)).toBeVisible();
+    const retryCall = fetchMock.mock.calls.find(
+      ([url]) => url === `/api/v1/processing-events/${processingEventId}/retry`,
+    );
+    expect(retryCall?.[1]?.headers).toEqual(
+      expect.objectContaining({ "X-CSRF-TOKEN": "csrf-token-1" }),
+    );
+    expect(retryCall?.[1]?.body).toBeUndefined();
+  });
+
+  it("does not expose Operations navigation to technicians or viewers", async () => {
+    const restrictedRoles = [
+      { code: "TECHNICIAN", displayName: "Technician" },
+      { code: "VIEWER", displayName: "Viewer" },
+    ] as const;
+
+    for (const role of restrictedRoles) {
+      installFetch(async (url) => {
+        if (url === "/api/v1/status") {
+          return statusResponse();
+        }
+        if (url === "/api/v1/session/csrf") {
+          return jsonResponse(csrfToken);
+        }
+        return jsonResponse({ ...identity, role });
+      });
+
+      const rendered = render(<App />);
+      await screen.findByRole("heading", { name: "Welcome, Nora Admin" });
+      expect(screen.queryByRole("button", { name: "Operations" })).toBeNull();
+      rendered.unmount();
+    }
+  });
+});
