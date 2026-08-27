@@ -175,6 +175,24 @@ public class SecurityConfiguration {
                                                 "/api/v1/alerts/{alertId}/resolve")
                                         .hasRole("OPERATIONS_ADMIN")
                                         .requestMatchers(
+                                                HttpMethod.GET,
+                                                "/api/v1/work-orders/eligible-technicians")
+                                        .hasRole("OPERATIONS_ADMIN")
+                                        .requestMatchers(
+                                                HttpMethod.HEAD,
+                                                "/api/v1/work-orders/eligible-technicians")
+                                        .hasRole("OPERATIONS_ADMIN")
+                                        .requestMatchers(
+                                                HttpMethod.GET,
+                                                "/api/v1/work-orders",
+                                                "/api/v1/work-orders/{workOrderId}")
+                                        .hasAnyRole("OPERATIONS_ADMIN", "TECHNICIAN", "VIEWER")
+                                        .requestMatchers(
+                                                HttpMethod.POST,
+                                                "/api/v1/work-orders",
+                                                "/api/v1/work-orders/{workOrderId}/assign")
+                                        .hasRole("OPERATIONS_ADMIN")
+                                        .requestMatchers(
                                                 HttpMethod.GET, "/api/v1/processing-events/dead")
                                         .hasRole("OPERATIONS_ADMIN")
                                         .requestMatchers(

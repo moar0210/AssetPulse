@@ -26,6 +26,7 @@ import { getApiStatus } from "./api/status";
 import { AlertPanel } from "./AlertPanel";
 import { OperationsPanel } from "./OperationsPanel";
 import { TelemetryPanel } from "./TelemetryPanel";
+import { WorkOrderPanel } from "./WorkOrderPanel";
 import "./App.css";
 
 type ApiConnectionState = "checking" | "available" | "unavailable";
@@ -42,7 +43,7 @@ type ApplicationState =
 
 type LoginOutcome = "authenticated" | "invalid-credentials" | "unavailable";
 type LogoutOutcome = "logged-out" | "unavailable";
-type WorkspaceView = "assets" | "alerts" | "operations";
+type WorkspaceView = "assets" | "alerts" | "work-orders" | "operations";
 
 type AssetListState =
   | Readonly<{ kind: "loading" }>
@@ -652,6 +653,13 @@ function AuthenticatedPanel({
         >
           Alerts
         </button>
+        <button
+          type="button"
+          aria-current={workspaceView === "work-orders" ? "page" : undefined}
+          onClick={() => setWorkspaceView("work-orders")}
+        >
+          Work orders
+        </button>
         {identity.role.code === "OPERATIONS_ADMIN" && (
           <button
             type="button"
@@ -735,6 +743,14 @@ function AuthenticatedPanel({
       {workspaceView === "alerts" && (
         <AlertPanel
           roleCode={identity.role.code}
+          csrfToken={csrfToken}
+          onSessionExpired={onSessionExpired}
+        />
+      )}
+
+      {workspaceView === "work-orders" && (
+        <WorkOrderPanel
+          identity={identity}
           csrfToken={csrfToken}
           onSessionExpired={onSessionExpired}
         />
