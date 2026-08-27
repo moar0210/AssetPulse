@@ -44,7 +44,7 @@ public class WorkOrderController {
     }
 
     @GetMapping(path = "/{workOrderId}", produces = MediaType.APPLICATION_JSON_VALUE)
-    public ResponseEntity<WorkOrderResponse> detail(
+    public ResponseEntity<WorkOrderDetailResponse> detail(
             @PathVariable UUID workOrderId, @AuthenticationPrincipal AuthenticatedActor actor) {
         return ResponseEntity.ok()
                 .cacheControl(CacheControl.noStore())
@@ -54,10 +54,10 @@ public class WorkOrderController {
     @PostMapping(
             consumes = MediaType.APPLICATION_JSON_VALUE,
             produces = MediaType.APPLICATION_JSON_VALUE)
-    public ResponseEntity<WorkOrderResponse> create(
+    public ResponseEntity<WorkOrderDetailResponse> create(
             @Valid @RequestBody CreateWorkOrderRequest request,
             @AuthenticationPrincipal AuthenticatedActor actor) {
-        WorkOrderResponse created = service.create(actor.organisationId(), request.alertId());
+        WorkOrderDetailResponse created = service.create(actor.organisationId(), request.alertId());
         return ResponseEntity.created(URI.create("/api/v1/work-orders/" + created.id()))
                 .cacheControl(CacheControl.noStore())
                 .body(created);
@@ -67,12 +67,38 @@ public class WorkOrderController {
             path = "/{workOrderId}/assign",
             consumes = MediaType.APPLICATION_JSON_VALUE,
             produces = MediaType.APPLICATION_JSON_VALUE)
-    public ResponseEntity<WorkOrderResponse> assign(
+    public ResponseEntity<WorkOrderDetailResponse> assign(
             @PathVariable UUID workOrderId,
             @Valid @RequestBody AssignWorkOrderRequest request,
             @AuthenticationPrincipal AuthenticatedActor actor) {
         return ResponseEntity.ok()
                 .cacheControl(CacheControl.noStore())
-                .body(service.assign(actor.organisationId(), workOrderId, request));
+                .body(service.assign(actor.organisationId(), actor.userId(), workOrderId, request));
+    }
+
+    @PostMapping(
+            path = "/{workOrderId}/start",
+            consumes = MediaType.APPLICATION_JSON_VALUE,
+            produces = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<WorkOrderDetailResponse> start(
+            @PathVariable UUID workOrderId,
+            @Valid @RequestBody TransitionWorkOrderRequest request,
+            @AuthenticationPrincipal AuthenticatedActor actor) {
+        return ResponseEntity.ok()
+                .cacheControl(CacheControl.noStore())
+                .body(service.start(actor, workOrderId, request));
+    }
+
+    @PostMapping(
+            path = "/{workOrderId}/complete",
+            consumes = MediaType.APPLICATION_JSON_VALUE,
+            produces = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<WorkOrderDetailResponse> complete(
+            @PathVariable UUID workOrderId,
+            @Valid @RequestBody TransitionWorkOrderRequest request,
+            @AuthenticationPrincipal AuthenticatedActor actor) {
+        return ResponseEntity.ok()
+                .cacheControl(CacheControl.noStore())
+                .body(service.complete(actor, workOrderId, request));
     }
 }

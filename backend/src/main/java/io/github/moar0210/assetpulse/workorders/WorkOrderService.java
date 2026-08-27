@@ -3,7 +3,9 @@ package io.github.moar0210.assetpulse.workorders;
 import io.github.moar0210.assetpulse.identity.AuthenticatedActor;
 import java.time.Instant;
 import java.util.UUID;
+import org.springframework.security.access.AccessDeniedException;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Isolation;
 import org.springframework.transaction.annotation.Transactional;
 
 @Service
@@ -30,17 +32,23 @@ public class WorkOrderService {
                 request.limit());
     }
 
-    @Transactional(readOnly = true)
-    public WorkOrderResponse detail(AuthenticatedActor actor, UUID workOrderId) {
+    @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
+    public WorkOrderDetailResponse detail(AuthenticatedActor actor, UUID workOrderId) {
+        WorkOrderResponse summary;
         if (isTechnician(actor)) {
-            return repository
-                    .findAssignedByOrganisationIdAndIdAndTechnicianId(
-                            actor.organisationId(), workOrderId, actor.userId())
-                    .orElseThrow(WorkOrderNotFoundException::new);
+            summary =
+                    repository
+                            .findAssignedByOrganisationIdAndIdAndTechnicianId(
+                                    actor.organisationId(), workOrderId, actor.userId())
+                            .orElseThrow(WorkOrderNotFoundException::new);
+        } else {
+            summary =
+                    repository
+                            .findByOrganisationIdAndId(actor.organisationId(), workOrderId)
+                            .orElseThrow(WorkOrderNotFoundException::new);
         }
-        return repository
-                .findByOrganisationIdAndId(actor.organisationId(), workOrderId)
-                .orElseThrow(WorkOrderNotFoundException::new);
+        return WorkOrderDetailResponse.from(
+                summary, repository.findHistory(actor.organisationId(), workOrderId));
     }
 
     @Transactional(readOnly = true)
@@ -50,7 +58,7 @@ public class WorkOrderService {
     }
 
     @Transactional
-    public WorkOrderResponse create(UUID organisationId, UUID alertId) {
+    public WorkOrderDetailResponse create(UUID organisationId, UUID alertId) {
         UUID workOrderId = UUID.randomUUID();
         int inserted =
                 repository.insertFromAlert(workOrderId, organisationId, alertId, Instant.now());
@@ -60,15 +68,15 @@ public class WorkOrderService {
             }
             throw new WorkOrderSourceAlertNotFoundException();
         }
-        return repository
-                .findByOrganisationIdAndId(organisationId, workOrderId)
-                .orElseThrow(
-                        () -> new IllegalStateException("Created work order could not be read"));
+        return commandDetail(organisationId, workOrderId);
     }
 
     @Transactional
-    public WorkOrderResponse assign(
-            UUID organisationId, UUID workOrderId, AssignWorkOrderRequest request) {
+    public WorkOrderDetailResponse assign(
+            UUID organisationId,
+            UUID actorUserId,
+            UUID workOrderId,
+            AssignWorkOrderRequest request) {
         if (!repository.workOrderExists(organisationId, workOrderId)) {
             throw new WorkOrderNotFoundException();
         }
@@ -88,10 +96,76 @@ public class WorkOrderService {
         if (updated == 0) {
             throw new WorkOrderStateConflictException();
         }
-        return repository
-                .findByOrganisationIdAndId(organisationId, workOrderId)
-                .orElseThrow(
-                        () -> new IllegalStateException("Assigned work order could not be read"));
+        repository.insertHistory(organisationId, workOrderId, WorkOrderStatus.OPEN, actorUserId);
+        return commandDetail(organisationId, workOrderId);
+    }
+
+    @Transactional
+    public WorkOrderDetailResponse start(
+            AuthenticatedActor actor, UUID workOrderId, TransitionWorkOrderRequest request) {
+        return transition(
+                actor,
+                workOrderId,
+                request.expectedVersion(),
+                WorkOrderStatus.ASSIGNED,
+                WorkOrderStatus.IN_PROGRESS);
+    }
+
+    @Transactional
+    public WorkOrderDetailResponse complete(
+            AuthenticatedActor actor, UUID workOrderId, TransitionWorkOrderRequest request) {
+        return transition(
+                actor,
+                workOrderId,
+                request.expectedVersion(),
+                WorkOrderStatus.IN_PROGRESS,
+                WorkOrderStatus.DONE);
+    }
+
+    private WorkOrderDetailResponse transition(
+            AuthenticatedActor actor,
+            UUID workOrderId,
+            long expectedVersion,
+            WorkOrderStatus expectedStatus,
+            WorkOrderStatus targetStatus) {
+        if (!isTechnician(actor)) {
+            throw new AccessDeniedException("Only technicians can transition assigned work");
+        }
+
+        int updated =
+                repository.transition(
+                        actor.organisationId(),
+                        workOrderId,
+                        actor.userId(),
+                        expectedVersion,
+                        expectedStatus,
+                        targetStatus,
+                        Instant.now());
+        if (updated == 0) {
+            if (repository
+                    .findAssignedByOrganisationIdAndIdAndTechnicianId(
+                            actor.organisationId(), workOrderId, actor.userId())
+                    .isPresent()) {
+                throw new WorkOrderStateConflictException();
+            }
+            throw new WorkOrderNotFoundException();
+        }
+
+        repository.insertHistory(
+                actor.organisationId(), workOrderId, expectedStatus, actor.userId());
+        return commandDetail(actor.organisationId(), workOrderId);
+    }
+
+    private WorkOrderDetailResponse commandDetail(UUID organisationId, UUID workOrderId) {
+        WorkOrderResponse summary =
+                repository
+                        .findByOrganisationIdAndId(organisationId, workOrderId)
+                        .orElseThrow(
+                                () ->
+                                        new IllegalStateException(
+                                                "Changed work order could not be read"));
+        return WorkOrderDetailResponse.from(
+                summary, repository.findHistory(organisationId, workOrderId));
     }
 
     private static boolean isTechnician(AuthenticatedActor actor) {

@@ -193,6 +193,11 @@ public class SecurityConfiguration {
                                                 "/api/v1/work-orders/{workOrderId}/assign")
                                         .hasRole("OPERATIONS_ADMIN")
                                         .requestMatchers(
+                                                HttpMethod.POST,
+                                                "/api/v1/work-orders/{workOrderId}/start",
+                                                "/api/v1/work-orders/{workOrderId}/complete")
+                                        .hasRole("TECHNICIAN")
+                                        .requestMatchers(
                                                 HttpMethod.GET, "/api/v1/processing-events/dead")
                                         .hasRole("OPERATIONS_ADMIN")
                                         .requestMatchers(

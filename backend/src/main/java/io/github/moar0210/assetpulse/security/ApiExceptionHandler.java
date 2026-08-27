@@ -161,7 +161,7 @@ public class ApiExceptionHandler {
                 HttpStatus.CONFLICT,
                 "WORK_ORDER_STATE_CONFLICT",
                 "Work-order state conflict",
-                "The work order cannot be assigned from its current state and version.");
+                "The work order cannot be changed from its current state and version.");
     }
 
     @ExceptionHandler(InvalidWorkOrderQueryException.class)

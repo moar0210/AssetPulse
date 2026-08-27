@@ -1,6 +1,8 @@
 package io.github.moar0210.assetpulse.workorders;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.doAnswer;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.head;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -11,6 +13,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.moar0210.assetpulse.identity.AuthenticatedActor;
+import io.github.moar0210.assetpulse.identity.DatabaseUserDetailsService;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
@@ -22,16 +26,19 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.mock.web.MockHttpSession;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
@@ -62,6 +69,8 @@ class WorkOrderApiIntegrationTest {
             UUID.fromString("10000000-0000-0000-0000-000000000002");
     private static final UUID NORTHSTAR_VIEWER_ID =
             UUID.fromString("10000000-0000-0000-0000-000000000003");
+    private static final UUID RIVERSIDE_ADMIN_ID =
+            UUID.fromString("10000000-0000-0000-0000-000000000004");
     private static final UUID RIVERSIDE_TECHNICIAN_ID =
             UUID.fromString("11000000-0000-0000-0000-000000000001");
     private static final UUID NORTHSTAR_SECOND_TECHNICIAN_ID =
@@ -105,9 +114,13 @@ class WorkOrderApiIntegrationTest {
     @Autowired private MockMvc mockMvc;
     @Autowired private ObjectMapper objectMapper;
     @Autowired private JdbcClient jdbcClient;
+    @Autowired private WorkOrderService workOrderService;
+    @Autowired private DatabaseUserDetailsService userDetailsService;
+    @MockitoSpyBean private WorkOrderRepository repository;
 
     @BeforeEach
     void clearWorkOrderFixtures() {
+        jdbcClient.sql("TRUNCATE TABLE work_order_status_history").update();
         jdbcClient.sql("DELETE FROM work_order").update();
         jdbcClient.sql("TRUNCATE TABLE alert_status_history").update();
         jdbcClient.sql("DELETE FROM alert").update();
@@ -135,6 +148,7 @@ class WorkOrderApiIntegrationTest {
         assertThat(result.getResponse().getHeader("Location"))
                 .isEqualTo(WORK_ORDERS_PATH + "/" + workOrderId);
         assertExactWorkOrder(payload, workOrderId, NORTHSTAR_ALERT_ONE_ID, "OPEN", 0, false);
+        assertThat(payload.path("history")).isEmpty();
         assertSafe(payload);
         assertThat(payload.path("createdAt")).isEqualTo(payload.path("updatedAt"));
 
@@ -469,6 +483,14 @@ class WorkOrderApiIntegrationTest {
                 assigned, NORTHSTAR_WORK_ORDER_ONE_ID, NORTHSTAR_ALERT_ONE_ID, "ASSIGNED", 1, true);
         assertThat(assigned.path("updatedAt").asText())
                 .isGreaterThanOrEqualTo(assigned.path("createdAt").asText());
+        assertHistory(
+                assigned.path("history").get(0),
+                1,
+                "OPEN",
+                "ASSIGNED",
+                NORTHSTAR_ADMIN_ID,
+                "Nora Admin",
+                assigned.path("updatedAt").asText());
 
         String rowAfterSuccess = assignmentState(NORTHSTAR_WORK_ORDER_ONE_ID);
         problem(
@@ -476,6 +498,7 @@ class WorkOrderApiIntegrationTest {
                 409,
                 "WORK_ORDER_STATE_CONFLICT");
         assertThat(assignmentState(NORTHSTAR_WORK_ORDER_ONE_ID)).isEqualTo(rowAfterSuccess);
+        assertThat(count("work_order_status_history")).isOne();
     }
 
     @Test
@@ -554,6 +577,610 @@ class WorkOrderApiIntegrationTest {
                 .andExpect(jsonPath("$.code").value("AUTHENTICATION_REQUIRED"));
         assertThat(count("work_order")).isOne();
         assertOpenUnchanged(NORTHSTAR_WORK_ORDER_ONE_ID);
+    }
+
+    @Test
+    void assignedTechnicianCompletesTheVersionedLifecycleWithAnImmutableChronologicalHistory()
+            throws Exception {
+        insertAlert(NORTHSTAR_ALERT_ONE_ID, NORTHSTAR_ID, NORTHSTAR_RULE_ONE_ID, "OPEN", 1);
+        insertOpenWorkOrder(
+                NORTHSTAR_WORK_ORDER_ONE_ID, NORTHSTAR_ID, NORTHSTAR_ALERT_ONE_ID, CREATED_AT);
+        AuthenticatedSession admin = login("admin@northstar.example");
+        AuthenticatedSession technician = login("technician@northstar.example");
+        JsonNode assigned =
+                payload(
+                        mockMvc.perform(
+                                        assign(
+                                                admin,
+                                                NORTHSTAR_WORK_ORDER_ONE_ID,
+                                                NORTHSTAR_TECHNICIAN_ID,
+                                                0L))
+                                .andExpect(status().isOk())
+                                .andReturn());
+        JsonNode started =
+                payload(
+                        mockMvc.perform(
+                                        command(
+                                                technician,
+                                                NORTHSTAR_WORK_ORDER_ONE_ID,
+                                                "start",
+                                                1))
+                                .andExpect(status().isOk())
+                                .andExpect(header().string("Cache-Control", "no-store"))
+                                .andReturn());
+        assertExactWorkOrder(
+                started,
+                NORTHSTAR_WORK_ORDER_ONE_ID,
+                NORTHSTAR_ALERT_ONE_ID,
+                "IN_PROGRESS",
+                2,
+                true);
+        assertThat(started.path("history")).hasSize(2);
+        assertThat(started.path("history").get(0)).isEqualTo(assigned.path("history").get(0));
+        assertHistory(
+                started.path("history").get(1),
+                2,
+                "ASSIGNED",
+                "IN_PROGRESS",
+                NORTHSTAR_TECHNICIAN_ID,
+                "Theo Technician",
+                started.path("updatedAt").asText());
+
+        JsonNode completed =
+                payload(
+                        mockMvc.perform(
+                                        command(
+                                                technician,
+                                                NORTHSTAR_WORK_ORDER_ONE_ID,
+                                                "complete",
+                                                2))
+                                .andExpect(status().isOk())
+                                .andExpect(header().string("Cache-Control", "no-store"))
+                                .andReturn());
+        assertExactWorkOrder(
+                completed, NORTHSTAR_WORK_ORDER_ONE_ID, NORTHSTAR_ALERT_ONE_ID, "DONE", 3, true);
+        assertThat(completed.path("history")).hasSize(3);
+        assertThat(completed.path("history").get(0)).isEqualTo(assigned.path("history").get(0));
+        assertThat(completed.path("history").get(1)).isEqualTo(started.path("history").get(1));
+        assertHistory(
+                completed.path("history").get(2),
+                3,
+                "IN_PROGRESS",
+                "DONE",
+                NORTHSTAR_TECHNICIAN_ID,
+                "Theo Technician",
+                completed.path("updatedAt").asText());
+        assertThat(Instant.parse(started.path("updatedAt").asText()))
+                .isAfterOrEqualTo(Instant.parse(assigned.path("updatedAt").asText()));
+        assertThat(Instant.parse(completed.path("updatedAt").asText()))
+                .isAfterOrEqualTo(Instant.parse(started.path("updatedAt").asText()));
+        assertThat(completed.path("assignedTechnician"))
+                .isEqualTo(assigned.path("assignedTechnician"));
+        assertThat(detail(technician.session(), NORTHSTAR_WORK_ORDER_ONE_ID)).isEqualTo(completed);
+        assertThat(detail(admin.session(), NORTHSTAR_WORK_ORDER_ONE_ID)).isEqualTo(completed);
+        assertThat(detail(login("viewer@northstar.example").session(), NORTHSTAR_WORK_ORDER_ONE_ID))
+                .isEqualTo(completed);
+        JsonNode summary = list(technician.session(), null).path("workOrders").get(0);
+        assertThat(summary.path("status").asText()).isEqualTo("DONE");
+        assertThat(summary.path("version").asLong()).isEqualTo(3);
+        assertThat(summary.has("history")).isFalse();
+        assertSafe(completed);
+        assertThat(count("work_order_status_history")).isEqualTo(3);
+        assertThatThrownBy(
+                        () ->
+                                jdbcClient
+                                        .sql(
+                                                "UPDATE work_order_status_history SET actor_user_id = :actorId")
+                                        .param("actorId", NORTHSTAR_ADMIN_ID)
+                                        .update())
+                .isInstanceOf(DataIntegrityViolationException.class);
+        assertThatThrownBy(() -> jdbcClient.sql("DELETE FROM work_order_status_history").update())
+                .isInstanceOf(DataIntegrityViolationException.class);
+        assertThat(detail(technician.session(), NORTHSTAR_WORK_ORDER_ONE_ID)).isEqualTo(completed);
+    }
+
+    @Test
+    void lifecycleCommandsDenyOtherRolesBeforeLookingUpAnyWorkOrder() throws Exception {
+        insertAlert(NORTHSTAR_ALERT_ONE_ID, NORTHSTAR_ID, NORTHSTAR_RULE_ONE_ID, "OPEN", 1);
+        insertAssignedWorkOrder(
+                NORTHSTAR_WORK_ORDER_ONE_ID,
+                NORTHSTAR_ID,
+                NORTHSTAR_ALERT_ONE_ID,
+                NORTHSTAR_TECHNICIAN_ID,
+                CREATED_AT);
+        String before = assignmentState(NORTHSTAR_WORK_ORDER_ONE_ID);
+        for (String email :
+                List.of(
+                        "admin@northstar.example",
+                        "viewer@northstar.example",
+                        "admin@riverside.example")) {
+            AuthenticatedSession denied = login(email);
+            for (String action : List.of("start", "complete")) {
+                for (UUID workOrderId : List.of(NORTHSTAR_WORK_ORDER_ONE_ID, MISSING_ID)) {
+                    problem(command(denied, workOrderId, action, 1), 403, "ACCESS_DENIED");
+                    problem(rawCommand(denied, workOrderId, action, "{}"), 403, "ACCESS_DENIED");
+                }
+            }
+        }
+        assertThat(assignmentState(NORTHSTAR_WORK_ORDER_ONE_ID)).isEqualTo(before);
+        assertThat(count("work_order_status_history")).isOne();
+    }
+
+    @Test
+    void lifecycleCommandsHideMissingForeignUnassignedAndOtherTechnicianWorkIdentically()
+            throws Exception {
+        insertAlert(NORTHSTAR_ALERT_ONE_ID, NORTHSTAR_ID, NORTHSTAR_RULE_ONE_ID, "OPEN", 1);
+        insertAlert(NORTHSTAR_ALERT_TWO_ID, NORTHSTAR_ID, NORTHSTAR_RULE_TWO_ID, "OPEN", 2);
+        insertAlert(RIVERSIDE_ALERT_ID, RIVERSIDE_ID, RIVERSIDE_RULE_ID, "OPEN", 3);
+        insertTestTechnician(NORTHSTAR_SECOND_TECHNICIAN_ID, NORTHSTAR_ID, 200);
+        insertTestTechnician(RIVERSIDE_TECHNICIAN_ID, RIVERSIDE_ID, 999);
+        insertOpenWorkOrder(
+                NORTHSTAR_WORK_ORDER_ONE_ID, NORTHSTAR_ID, NORTHSTAR_ALERT_ONE_ID, CREATED_AT);
+        insertAssignedWorkOrder(
+                NORTHSTAR_WORK_ORDER_TWO_ID,
+                NORTHSTAR_ID,
+                NORTHSTAR_ALERT_TWO_ID,
+                NORTHSTAR_SECOND_TECHNICIAN_ID,
+                CREATED_AT);
+        insertAssignedWorkOrder(
+                RIVERSIDE_WORK_ORDER_ID,
+                RIVERSIDE_ID,
+                RIVERSIDE_ALERT_ID,
+                RIVERSIDE_TECHNICIAN_ID,
+                CREATED_AT);
+        AuthenticatedSession technician = login("technician@northstar.example");
+        List<String> before = workOrderRows();
+        for (String action : List.of("start", "complete")) {
+            JsonNode missing =
+                    problem(
+                            command(technician, MISSING_ID, action, 1),
+                            404,
+                            "WORK_ORDER_NOT_FOUND");
+            for (UUID inaccessible :
+                    List.of(
+                            NORTHSTAR_WORK_ORDER_ONE_ID,
+                            NORTHSTAR_WORK_ORDER_TWO_ID,
+                            RIVERSIDE_WORK_ORDER_ID)) {
+                JsonNode denied =
+                        problem(
+                                command(technician, inaccessible, action, 1)
+                                        .queryParam("organisationId", RIVERSIDE_ID.toString())
+                                        .queryParam(
+                                                "technicianUserId",
+                                                NORTHSTAR_SECOND_TECHNICIAN_ID.toString())
+                                        .header("X-Organisation-ID", RIVERSIDE_ID.toString())
+                                        .header(
+                                                "X-User-ID",
+                                                NORTHSTAR_SECOND_TECHNICIAN_ID.toString())
+                                        .header("X-Role", "OPERATIONS_ADMIN"),
+                                404,
+                                "WORK_ORDER_NOT_FOUND");
+                assertEquivalentProblems(missing, denied);
+            }
+        }
+        assertThat(workOrderRows()).isEqualTo(before);
+        assertThat(count("work_order_status_history")).isEqualTo(2);
+    }
+
+    @Test
+    void lifecycleCommandsRequireAuthenticationAndValidCsrf() throws Exception {
+        insertAlert(NORTHSTAR_ALERT_ONE_ID, NORTHSTAR_ID, NORTHSTAR_RULE_ONE_ID, "OPEN", 1);
+        insertAssignedWorkOrder(
+                NORTHSTAR_WORK_ORDER_ONE_ID,
+                NORTHSTAR_ID,
+                NORTHSTAR_ALERT_ONE_ID,
+                NORTHSTAR_TECHNICIAN_ID,
+                CREATED_AT);
+        AuthenticatedSession technician = login("technician@northstar.example");
+        CsrfExchange anonymous = csrf(null);
+        String before = assignmentState(NORTHSTAR_WORK_ORDER_ONE_ID);
+        for (String action : List.of("start", "complete")) {
+            for (String csrfToken : List.of("", "invalid-token")) {
+                MockHttpServletRequestBuilder request =
+                        post(WORK_ORDERS_PATH + "/" + NORTHSTAR_WORK_ORDER_ONE_ID + "/" + action)
+                                .session(technician.session())
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content("{\"expectedVersion\":1}");
+                if (!csrfToken.isEmpty()) {
+                    request.header(technician.csrfHeaderName(), csrfToken);
+                }
+                problem(request, 403, "CSRF_REJECTED");
+            }
+            problem(
+                    post(WORK_ORDERS_PATH + "/" + NORTHSTAR_WORK_ORDER_ONE_ID + "/" + action)
+                            .session(anonymous.session())
+                            .header(anonymous.headerName(), anonymous.token())
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content("{\"expectedVersion\":1}"),
+                    401,
+                    "AUTHENTICATION_REQUIRED");
+        }
+        assertThat(assignmentState(NORTHSTAR_WORK_ORDER_ONE_ID)).isEqualTo(before);
+        assertThat(count("work_order_status_history")).isOne();
+    }
+
+    @Test
+    void lifecycleCommandsRejectInvalidVersionsAndAdditionalBodyFieldsWithoutEffects()
+            throws Exception {
+        insertAlert(NORTHSTAR_ALERT_ONE_ID, NORTHSTAR_ID, NORTHSTAR_RULE_ONE_ID, "OPEN", 1);
+        insertAssignedWorkOrder(
+                NORTHSTAR_WORK_ORDER_ONE_ID,
+                NORTHSTAR_ID,
+                NORTHSTAR_ALERT_ONE_ID,
+                NORTHSTAR_TECHNICIAN_ID,
+                CREATED_AT);
+        AuthenticatedSession technician = login("technician@northstar.example");
+        String before = assignmentState(NORTHSTAR_WORK_ORDER_ONE_ID);
+        for (String action : List.of("start", "complete")) {
+            for (String invalid :
+                    List.of(
+                            "null",
+                            "-1",
+                            "1.0",
+                            "1.5",
+                            "1e0",
+                            "\"1\"",
+                            "true",
+                            "[]",
+                            "{}",
+                            "9223372036854775808")) {
+                problem(
+                        rawCommand(
+                                technician,
+                                NORTHSTAR_WORK_ORDER_ONE_ID,
+                                action,
+                                "{\"expectedVersion\":" + invalid + "}"),
+                        400,
+                        "INVALID_REQUEST");
+            }
+            for (String invalidBody :
+                    List.of(
+                            "",
+                            "null",
+                            "{}",
+                            "[]",
+                            "{",
+                            "{\"expectedVersion\":1,\"organisationId\":\"" + NORTHSTAR_ID + "\"}",
+                            "{\"expectedVersion\":1,\"technicianUserId\":\""
+                                    + NORTHSTAR_TECHNICIAN_ID
+                                    + "\"}",
+                            "{\"expectedVersion\":1,\"status\":\"DONE\"}",
+                            "{\"expectedVersion\":1,\"actorUserId\":\""
+                                    + NORTHSTAR_ADMIN_ID
+                                    + "\"}")) {
+                problem(
+                        rawCommand(technician, NORTHSTAR_WORK_ORDER_ONE_ID, action, invalidBody),
+                        400,
+                        "INVALID_REQUEST");
+            }
+        }
+        assertThat(assignmentState(NORTHSTAR_WORK_ORDER_ONE_ID)).isEqualTo(before);
+        assertThat(count("work_order_status_history")).isOne();
+    }
+
+    @Test
+    void staleRepeatedSkippedAndReversedCommandsHaveNoStateOrHistoryEffects() throws Exception {
+        insertAlert(NORTHSTAR_ALERT_ONE_ID, NORTHSTAR_ID, NORTHSTAR_RULE_ONE_ID, "OPEN", 1);
+        insertAssignedWorkOrder(
+                NORTHSTAR_WORK_ORDER_ONE_ID,
+                NORTHSTAR_ID,
+                NORTHSTAR_ALERT_ONE_ID,
+                NORTHSTAR_TECHNICIAN_ID,
+                CREATED_AT);
+        AuthenticatedSession technician = login("technician@northstar.example");
+        JsonNode assigned = detail(technician.session(), NORTHSTAR_WORK_ORDER_ONE_ID);
+        for (long version : List.of(0L, 2L, Long.MAX_VALUE)) {
+            problem(
+                    command(technician, NORTHSTAR_WORK_ORDER_ONE_ID, "start", version),
+                    409,
+                    "WORK_ORDER_STATE_CONFLICT");
+        }
+        problem(
+                command(technician, NORTHSTAR_WORK_ORDER_ONE_ID, "complete", 1),
+                409,
+                "WORK_ORDER_STATE_CONFLICT");
+        assertThat(detail(technician.session(), NORTHSTAR_WORK_ORDER_ONE_ID)).isEqualTo(assigned);
+
+        JsonNode started =
+                payload(
+                        mockMvc.perform(
+                                        command(
+                                                technician,
+                                                NORTHSTAR_WORK_ORDER_ONE_ID,
+                                                "start",
+                                                1))
+                                .andExpect(status().isOk())
+                                .andReturn());
+        for (long version : List.of(1L, 2L)) {
+            problem(
+                    command(technician, NORTHSTAR_WORK_ORDER_ONE_ID, "start", version),
+                    409,
+                    "WORK_ORDER_STATE_CONFLICT");
+        }
+        problem(
+                command(technician, NORTHSTAR_WORK_ORDER_ONE_ID, "complete", 1),
+                409,
+                "WORK_ORDER_STATE_CONFLICT");
+        assertThat(detail(technician.session(), NORTHSTAR_WORK_ORDER_ONE_ID)).isEqualTo(started);
+
+        JsonNode completed =
+                payload(
+                        mockMvc.perform(
+                                        command(
+                                                technician,
+                                                NORTHSTAR_WORK_ORDER_ONE_ID,
+                                                "complete",
+                                                2))
+                                .andExpect(status().isOk())
+                                .andReturn());
+        for (String action : List.of("start", "complete")) {
+            for (long version : List.of(2L, 3L)) {
+                problem(
+                        command(technician, NORTHSTAR_WORK_ORDER_ONE_ID, action, version),
+                        409,
+                        "WORK_ORDER_STATE_CONFLICT");
+            }
+        }
+        problem(
+                assign(
+                        login("admin@northstar.example"),
+                        NORTHSTAR_WORK_ORDER_ONE_ID,
+                        NORTHSTAR_TECHNICIAN_ID,
+                        3L),
+                409,
+                "WORK_ORDER_STATE_CONFLICT");
+        assertThat(detail(technician.session(), NORTHSTAR_WORK_ORDER_ONE_ID)).isEqualTo(completed);
+        assertThat(count("work_order_status_history")).isEqualTo(3);
+    }
+
+    @Test
+    void concurrentSameVersionCommandsHaveOneWinnerAndAppendOneHistoryEntry() throws Exception {
+        insertAlert(NORTHSTAR_ALERT_ONE_ID, NORTHSTAR_ID, NORTHSTAR_RULE_ONE_ID, "OPEN", 1);
+        insertOpenWorkOrder(
+                NORTHSTAR_WORK_ORDER_ONE_ID, NORTHSTAR_ID, NORTHSTAR_ALERT_ONE_ID, CREATED_AT);
+        AuthenticatedSession firstAdmin = login("admin@northstar.example");
+        AuthenticatedSession secondAdmin = login("admin@northstar.example");
+        assertConcurrentWinner(
+                assign(firstAdmin, NORTHSTAR_WORK_ORDER_ONE_ID, NORTHSTAR_TECHNICIAN_ID, 0L),
+                assign(secondAdmin, NORTHSTAR_WORK_ORDER_ONE_ID, NORTHSTAR_TECHNICIAN_ID, 0L),
+                "ASSIGNED",
+                1);
+        AuthenticatedSession firstTechnician = login("technician@northstar.example");
+        AuthenticatedSession secondTechnician = login("technician@northstar.example");
+        assertConcurrentWinner(
+                command(firstTechnician, NORTHSTAR_WORK_ORDER_ONE_ID, "start", 1),
+                command(secondTechnician, NORTHSTAR_WORK_ORDER_ONE_ID, "start", 1),
+                "IN_PROGRESS",
+                2);
+        assertConcurrentWinner(
+                command(firstTechnician, NORTHSTAR_WORK_ORDER_ONE_ID, "complete", 2),
+                command(secondTechnician, NORTHSTAR_WORK_ORDER_ONE_ID, "complete", 2),
+                "DONE",
+                3);
+        assertThat(count("work_order_status_history")).isEqualTo(3);
+    }
+
+    @Test
+    void assignmentHistoryFailureRollsBackAssignmentVersionAndTimestamps() {
+        insertAlert(NORTHSTAR_ALERT_ONE_ID, NORTHSTAR_ID, NORTHSTAR_RULE_ONE_ID, "OPEN", 1);
+        insertOpenWorkOrder(
+                NORTHSTAR_WORK_ORDER_ONE_ID, NORTHSTAR_ID, NORTHSTAR_ALERT_ONE_ID, CREATED_AT);
+        String before = assignmentState(NORTHSTAR_WORK_ORDER_ONE_ID);
+        assertThatThrownBy(
+                        () ->
+                                workOrderService.assign(
+                                        NORTHSTAR_ID,
+                                        RIVERSIDE_ADMIN_ID,
+                                        NORTHSTAR_WORK_ORDER_ONE_ID,
+                                        new AssignWorkOrderRequest(NORTHSTAR_TECHNICIAN_ID, 0L)))
+                .isInstanceOf(DataIntegrityViolationException.class);
+        assertThat(assignmentState(NORTHSTAR_WORK_ORDER_ONE_ID)).isEqualTo(before);
+        assertThat(count("work_order_status_history")).isZero();
+    }
+
+    @Test
+    void lifecycleHistoryFailuresRollBackStateVersionAndTimestamps() {
+        insertAlert(NORTHSTAR_ALERT_ONE_ID, NORTHSTAR_ID, NORTHSTAR_RULE_ONE_ID, "OPEN", 1);
+        insertAssignedWorkOrder(
+                NORTHSTAR_WORK_ORDER_ONE_ID,
+                NORTHSTAR_ID,
+                NORTHSTAR_ALERT_ONE_ID,
+                NORTHSTAR_TECHNICIAN_ID,
+                CREATED_AT);
+        AuthenticatedActor actor =
+                (AuthenticatedActor)
+                        userDetailsService.loadUserByUsername("technician@northstar.example");
+        for (int sequenceNumber : List.of(2, 3)) {
+            String before = assignmentState(NORTHSTAR_WORK_ORDER_ONE_ID);
+            jdbcClient
+                    .sql(
+                            "ALTER TABLE work_order_status_history ADD CONSTRAINT ck_work_order_test_history CHECK (sequence_number < "
+                                    + sequenceNumber
+                                    + ") NOT VALID")
+                    .update();
+            try {
+                assertThatThrownBy(
+                                () -> {
+                                    if (sequenceNumber == 2) {
+                                        workOrderService.start(
+                                                actor,
+                                                NORTHSTAR_WORK_ORDER_ONE_ID,
+                                                new TransitionWorkOrderRequest(1L));
+                                    } else {
+                                        workOrderService.complete(
+                                                actor,
+                                                NORTHSTAR_WORK_ORDER_ONE_ID,
+                                                new TransitionWorkOrderRequest(2L));
+                                    }
+                                })
+                        .isInstanceOf(DataIntegrityViolationException.class);
+                assertThat(assignmentState(NORTHSTAR_WORK_ORDER_ONE_ID)).isEqualTo(before);
+                assertThat(count("work_order_status_history")).isEqualTo(sequenceNumber - 1);
+            } finally {
+                jdbcClient
+                        .sql(
+                                "ALTER TABLE work_order_status_history DROP CONSTRAINT ck_work_order_test_history")
+                        .update();
+            }
+            if (sequenceNumber == 2) {
+                workOrderService.start(
+                        actor, NORTHSTAR_WORK_ORDER_ONE_ID, new TransitionWorkOrderRequest(1L));
+            }
+        }
+    }
+
+    @Test
+    void detailReadsStateAndHistoryFromOneSnapshotDuringAConcurrentTransition() throws Exception {
+        insertAlert(NORTHSTAR_ALERT_ONE_ID, NORTHSTAR_ID, NORTHSTAR_RULE_ONE_ID, "OPEN", 1);
+        insertAssignedWorkOrder(
+                NORTHSTAR_WORK_ORDER_ONE_ID,
+                NORTHSTAR_ID,
+                NORTHSTAR_ALERT_ONE_ID,
+                NORTHSTAR_TECHNICIAN_ID,
+                CREATED_AT);
+        AuthenticatedSession reader = login("technician@northstar.example");
+        AuthenticatedSession writer = login("technician@northstar.example");
+        JsonNode assigned = detail(reader.session(), NORTHSTAR_WORK_ORDER_ONE_ID);
+        CountDownLatch summaryRead = new CountDownLatch(1);
+        CountDownLatch allowHistory = new CountDownLatch(1);
+        AtomicBoolean firstRead = new AtomicBoolean(true);
+        doAnswer(
+                        invocation -> {
+                            if (firstRead.compareAndSet(true, false)) {
+                                summaryRead.countDown();
+                                if (!allowHistory.await(10, TimeUnit.SECONDS)) {
+                                    throw new IllegalStateException(
+                                            "Timed out waiting to read work-order history");
+                                }
+                            }
+                            return invocation.callRealMethod();
+                        })
+                .when(repository)
+                .findHistory(NORTHSTAR_ID, NORTHSTAR_WORK_ORDER_ONE_ID);
+        try (ExecutorService executor = Executors.newSingleThreadExecutor()) {
+            Future<JsonNode> inFlight =
+                    executor.submit(() -> detail(reader.session(), NORTHSTAR_WORK_ORDER_ONE_ID));
+            try {
+                assertThat(summaryRead.await(10, TimeUnit.SECONDS)).isTrue();
+                mockMvc.perform(command(writer, NORTHSTAR_WORK_ORDER_ONE_ID, "start", 1))
+                        .andExpect(status().isOk())
+                        .andExpect(jsonPath("$.history.length()").value(2));
+                allowHistory.countDown();
+                assertThat(inFlight.get(10, TimeUnit.SECONDS)).isEqualTo(assigned);
+            } finally {
+                allowHistory.countDown();
+            }
+        }
+        JsonNode latest = detail(reader.session(), NORTHSTAR_WORK_ORDER_ONE_ID);
+        assertThat(latest.path("status").asText()).isEqualTo("IN_PROGRESS");
+        assertThat(latest.path("version").asLong()).isEqualTo(2);
+        assertThat(latest.path("history")).hasSize(2);
+    }
+
+    private MockHttpServletRequestBuilder command(
+            AuthenticatedSession authenticated,
+            UUID workOrderId,
+            String action,
+            long expectedVersion) {
+        return rawCommand(
+                authenticated,
+                workOrderId,
+                action,
+                "{\"expectedVersion\":" + expectedVersion + "}");
+    }
+
+    private MockHttpServletRequestBuilder rawCommand(
+            AuthenticatedSession authenticated, UUID workOrderId, String action, String body) {
+        return post(WORK_ORDERS_PATH + "/" + workOrderId + "/" + action)
+                .session(authenticated.session())
+                .header(authenticated.csrfHeaderName(), authenticated.csrfToken())
+                .contentType(MediaType.APPLICATION_JSON)
+                .accept(MediaType.APPLICATION_JSON)
+                .content(body);
+    }
+
+    private void assertConcurrentWinner(
+            MockHttpServletRequestBuilder firstRequest,
+            MockHttpServletRequestBuilder secondRequest,
+            String expectedStatus,
+            int expectedVersion)
+            throws Exception {
+        CountDownLatch ready = new CountDownLatch(2);
+        CountDownLatch start = new CountDownLatch(1);
+        try (ExecutorService executor = Executors.newFixedThreadPool(2)) {
+            Future<MvcResult> first =
+                    executor.submit(() -> concurrentCommand(firstRequest, ready, start));
+            Future<MvcResult> second =
+                    executor.submit(() -> concurrentCommand(secondRequest, ready, start));
+            try {
+                assertThat(ready.await(10, TimeUnit.SECONDS)).isTrue();
+                start.countDown();
+                List<MvcResult> results =
+                        List.of(first.get(10, TimeUnit.SECONDS), second.get(10, TimeUnit.SECONDS));
+                assertThat(results)
+                        .extracting(result -> result.getResponse().getStatus())
+                        .containsExactlyInAnyOrder(200, 409);
+                for (MvcResult result : results) {
+                    JsonNode response = payload(result);
+                    if (result.getResponse().getStatus() == 200) {
+                        assertThat(response.path("status").asText()).isEqualTo(expectedStatus);
+                        assertThat(response.path("version").asInt()).isEqualTo(expectedVersion);
+                        assertThat(response.path("history")).hasSize(expectedVersion);
+                    } else {
+                        assertThat(response.path("code").asText())
+                                .isEqualTo("WORK_ORDER_STATE_CONFLICT");
+                    }
+                }
+                assertThat(count("work_order_status_history")).isEqualTo(expectedVersion);
+            } finally {
+                start.countDown();
+            }
+        }
+    }
+
+    private MvcResult concurrentCommand(
+            MockHttpServletRequestBuilder request, CountDownLatch ready, CountDownLatch start)
+            throws Exception {
+        ready.countDown();
+        if (!start.await(10, TimeUnit.SECONDS)) {
+            throw new IllegalStateException(
+                    "Timed out waiting to transition work orders concurrently");
+        }
+        return mockMvc.perform(request).andReturn();
+    }
+
+    private List<String> workOrderRows() {
+        return jdbcClient
+                .sql("SELECT row_to_json(work_order)::text FROM work_order ORDER BY id")
+                .query(String.class)
+                .list();
+    }
+
+    private JsonNode payload(MvcResult result) throws Exception {
+        return objectMapper.readTree(result.getResponse().getContentAsString());
+    }
+
+    private void assertHistory(
+            JsonNode history,
+            int sequenceNumber,
+            String fromStatus,
+            String toStatus,
+            UUID actorId,
+            String actorName,
+            String transitionedAt) {
+        assertThat(history.fieldNames())
+                .toIterable()
+                .containsExactly(
+                        "sequenceNumber", "fromStatus", "toStatus", "actor", "transitionedAt");
+        assertThat(history.path("sequenceNumber").asInt()).isEqualTo(sequenceNumber);
+        assertThat(history.path("fromStatus").asText()).isEqualTo(fromStatus);
+        assertThat(history.path("toStatus").asText()).isEqualTo(toStatus);
+        assertThat(history.path("actor").fieldNames())
+                .toIterable()
+                .containsExactly("id", "displayName");
+        assertThat(history.path("actor").path("id").asText()).isEqualTo(actorId.toString());
+        assertThat(history.path("actor").path("displayName").asText()).isEqualTo(actorName);
+        assertThat(history.path("transitionedAt").asText()).isEqualTo(transitionedAt);
     }
 
     private JsonNode list(MockHttpSession session, String limit) throws Exception {
@@ -653,7 +1280,13 @@ class WorkOrderApiIntegrationTest {
                         .andExpect(header().string("Cache-Control", "no-store"))
                         .andExpect(jsonPath("$.code").value(expectedCode))
                         .andReturn();
-        return objectMapper.readTree(result.getResponse().getContentAsString());
+        JsonNode response = objectMapper.readTree(result.getResponse().getContentAsString());
+        if ("WORK_ORDER_STATE_CONFLICT".equals(expectedCode)) {
+            assertThat(response.path("detail").asText())
+                    .isEqualTo(
+                            "The work order cannot be changed from its current state and version.");
+        }
+        return response;
     }
 
     private void assertExactWorkOrder(
@@ -673,7 +1306,9 @@ class WorkOrderApiIntegrationTest {
                         "assignedTechnician",
                         "createdAt",
                         "updatedAt",
-                        "context");
+                        "context",
+                        "history");
+        assertThat(payload.path("history")).hasSize((int) expectedVersion);
         assertThat(payload.path("id").asText()).isEqualTo(workOrderId.toString());
         assertThat(payload.path("alertId").asText()).isEqualTo(alertId.toString());
         assertThat(payload.path("status").asText()).isEqualTo(expectedStatus);
@@ -867,6 +1502,11 @@ class WorkOrderApiIntegrationTest {
                 .param("createdAt", createdAt.atOffset(ZoneOffset.UTC))
                 .param("assignedAt", createdAt.plusSeconds(1).atOffset(ZoneOffset.UTC))
                 .update();
+        repository.insertHistory(
+                organisationId,
+                workOrderId,
+                WorkOrderStatus.OPEN,
+                NORTHSTAR_ID.equals(organisationId) ? NORTHSTAR_ADMIN_ID : RIVERSIDE_ADMIN_ID);
     }
 
     private void insertTestTechnician(UUID userId, UUID organisationId, int index) {
