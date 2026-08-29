@@ -643,6 +643,123 @@ describe("work-order experience", () => {
     },
   ] as const;
 
+  it("WO-05: makes a same-version two-client race recoverable without replay", async () => {
+    let current: WorkOrderDetail = assignedDetail;
+    let detailReads = 0;
+    const recovery = pendingResponse();
+    const fetchMock = installFetch(async (url, init) => {
+      if (url === "/api/v1/work-orders?limit=50") {
+        return jsonResponse({ workOrders: [summaryOf(current)], limit: 50 });
+      }
+      if (url === `/api/v1/work-orders/${workOrderId}`) {
+        detailReads += 1;
+        return detailReads <= 2
+          ? jsonResponse(assignedDetail)
+          : recovery.promise;
+      }
+      if (url.endsWith("/start")) {
+        const expectedVersion = JSON.parse(String(init?.body)).expectedVersion;
+        if (expectedVersion !== current.version) {
+          return problemResponse("WORK_ORDER_STATE_CONFLICT", 409);
+        }
+        current = inProgressDetail;
+        return jsonResponse(current);
+      }
+      throw new Error(`Unexpected URL ${url}`);
+    });
+
+    render(
+      <>
+        <section aria-label="Technician client A">
+          <WorkOrderPanel
+            identity={technicianIdentity}
+            csrfToken={csrfToken}
+            onSessionExpired={() => {}}
+          />
+        </section>
+        <section aria-label="Technician client B">
+          <WorkOrderPanel
+            identity={technicianIdentity}
+            csrfToken={csrfToken}
+            onSessionExpired={() => {}}
+          />
+        </section>
+      </>,
+    );
+    const clientA = within(
+      screen.getByRole("region", { name: "Technician client A" }),
+    );
+    const clientB = within(
+      screen.getByRole("region", { name: "Technician client B" }),
+    );
+    fireEvent.click(
+      await clientA.findByRole("button", { name: /view assigned work order/i }),
+    );
+    fireEvent.click(
+      await clientB.findByRole("button", { name: /view assigned work order/i }),
+    );
+
+    const firstClientCommand = await clientA.findByRole("button", {
+      name: "Start work",
+    });
+    const secondClientCommand = await clientB.findByRole("button", {
+      name: "Start work",
+    });
+    fireEvent.click(firstClientCommand);
+    fireEvent.click(secondClientCommand);
+
+    expect(
+      await clientA.findByText(
+        "Work started. The work order is now in progress.",
+      ),
+    ).toBeVisible();
+    expect(
+      await clientB.findByText(
+        /server rejected this update because it accepted another client's change first/i,
+      ),
+    ).toHaveFocus();
+    expect(
+      clientB.getByRole("button", { name: "Recovering latest state…" }),
+    ).toBeDisabled();
+    expect(
+      clientB.queryByRole("button", { name: "Complete work" }),
+    ).not.toBeInTheDocument();
+    expect(
+      fetchMock.mock.calls.filter(([, request]) => request?.method === "POST"),
+    ).toHaveLength(2);
+
+    await act(async () => recovery.resolve(jsonResponse(current)));
+
+    expect(
+      await clientB.findByText(
+        /server accepted another client's change first.*update was not retried/i,
+      ),
+    ).toHaveFocus();
+    expect(
+      clientB.queryByRole("button", { name: "Start work" }),
+    ).not.toBeInTheDocument();
+    expect(
+      clientB.getByRole("button", { name: "Complete work" }),
+    ).toBeEnabled();
+    expect(
+      within(
+        clientB.getByRole("list", { name: "Work-order status history" }),
+      ).getAllByRole("listitem"),
+    ).toHaveLength(2);
+    expect(
+      fetchMock.mock.calls.filter(([, request]) => request?.method === "POST"),
+    ).toHaveLength(2);
+    expect(
+      fetchMock.mock.calls
+        .filter(([, request]) => request?.method === "POST")
+        .map(([, request]) => request?.body),
+    ).toEqual([
+      JSON.stringify({ expectedVersion: 1 }),
+      JSON.stringify({ expectedVersion: 1 }),
+    ]);
+    expect(detailReads).toBe(3);
+  });
+
   it.each(lifecycleCommands)(
     "WO-05: locks $command until failed conflict recovery is explicitly retried",
     async ({ command, actionName, before, after }) => {

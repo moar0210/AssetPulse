@@ -285,7 +285,7 @@ function WorkOrderDetailPanel({
         kind: reason,
         message:
           reason === "conflict"
-            ? "This work order changed before the update was accepted. Loading the latest saved state."
+            ? "The server rejected this update because it accepted another client's change first. Loading the latest saved state."
             : "The work-order update result could not be confirmed. Loading the latest saved state.",
       });
       const outcome = await readDetail(false);
@@ -307,7 +307,7 @@ function WorkOrderDetailPanel({
           kind: reason,
           message:
             reason === "conflict"
-              ? "This work order changed, but its latest saved state could not be loaded. Retry latest state before making another change."
+              ? "The server accepted another client's change first, but the latest saved state could not be loaded. This update was not retried. Retry latest state before making another change."
               : "The work-order update result and latest saved state could not be confirmed. Retry latest state before making another change.",
         });
         return;
@@ -317,7 +317,7 @@ function WorkOrderDetailPanel({
         kind: reason,
         message:
           reason === "conflict"
-            ? "This work order changed in another client. The latest saved state is now loaded."
+            ? "The server accepted another client's change first. The latest saved state is now loaded, and this update was not retried."
             : "The work-order update result could not be confirmed. The latest saved state is now loaded.",
       });
       onRefreshQueue();
