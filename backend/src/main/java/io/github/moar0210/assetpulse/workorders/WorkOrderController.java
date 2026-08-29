@@ -1,6 +1,8 @@
 package io.github.moar0210.assetpulse.workorders;
 
 import io.github.moar0210.assetpulse.identity.AuthenticatedActor;
+import io.github.moar0210.assetpulse.security.CorrelationIdFilter;
+import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import java.net.URI;
 import java.util.UUID;
@@ -56,8 +58,14 @@ public class WorkOrderController {
             produces = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<WorkOrderDetailResponse> create(
             @Valid @RequestBody CreateWorkOrderRequest request,
-            @AuthenticationPrincipal AuthenticatedActor actor) {
-        WorkOrderDetailResponse created = service.create(actor.organisationId(), request.alertId());
+            @AuthenticationPrincipal AuthenticatedActor actor,
+            HttpServletRequest httpRequest) {
+        WorkOrderDetailResponse created =
+                service.create(
+                        actor.organisationId(),
+                        actor.userId(),
+                        request.alertId(),
+                        CorrelationIdFilter.from(httpRequest));
         return ResponseEntity.created(URI.create("/api/v1/work-orders/" + created.id()))
                 .cacheControl(CacheControl.noStore())
                 .body(created);
@@ -70,10 +78,17 @@ public class WorkOrderController {
     public ResponseEntity<WorkOrderDetailResponse> assign(
             @PathVariable UUID workOrderId,
             @Valid @RequestBody AssignWorkOrderRequest request,
-            @AuthenticationPrincipal AuthenticatedActor actor) {
+            @AuthenticationPrincipal AuthenticatedActor actor,
+            HttpServletRequest httpRequest) {
         return ResponseEntity.ok()
                 .cacheControl(CacheControl.noStore())
-                .body(service.assign(actor.organisationId(), actor.userId(), workOrderId, request));
+                .body(
+                        service.assign(
+                                actor.organisationId(),
+                                actor.userId(),
+                                workOrderId,
+                                request,
+                                CorrelationIdFilter.from(httpRequest)));
     }
 
     @PostMapping(
@@ -83,10 +98,16 @@ public class WorkOrderController {
     public ResponseEntity<WorkOrderDetailResponse> start(
             @PathVariable UUID workOrderId,
             @Valid @RequestBody TransitionWorkOrderRequest request,
-            @AuthenticationPrincipal AuthenticatedActor actor) {
+            @AuthenticationPrincipal AuthenticatedActor actor,
+            HttpServletRequest httpRequest) {
         return ResponseEntity.ok()
                 .cacheControl(CacheControl.noStore())
-                .body(service.start(actor, workOrderId, request));
+                .body(
+                        service.start(
+                                actor,
+                                workOrderId,
+                                request,
+                                CorrelationIdFilter.from(httpRequest)));
     }
 
     @PostMapping(
@@ -96,9 +117,15 @@ public class WorkOrderController {
     public ResponseEntity<WorkOrderDetailResponse> complete(
             @PathVariable UUID workOrderId,
             @Valid @RequestBody TransitionWorkOrderRequest request,
-            @AuthenticationPrincipal AuthenticatedActor actor) {
+            @AuthenticationPrincipal AuthenticatedActor actor,
+            HttpServletRequest httpRequest) {
         return ResponseEntity.ok()
                 .cacheControl(CacheControl.noStore())
-                .body(service.complete(actor, workOrderId, request));
+                .body(
+                        service.complete(
+                                actor,
+                                workOrderId,
+                                request,
+                                CorrelationIdFilter.from(httpRequest)));
     }
 }

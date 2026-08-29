@@ -24,6 +24,7 @@ import {
 import type { CsrfToken, LoginRequest, SessionIdentity } from "./api/session";
 import { getApiStatus } from "./api/status";
 import { AlertPanel } from "./AlertPanel";
+import { AuditPanel } from "./AuditPanel";
 import { OperationsPanel } from "./OperationsPanel";
 import { TelemetryPanel } from "./TelemetryPanel";
 import { WorkOrderPanel } from "./WorkOrderPanel";
@@ -758,10 +759,13 @@ function AuthenticatedPanel({
 
       {workspaceView === "operations" &&
         identity.role.code === "OPERATIONS_ADMIN" && (
-          <OperationsPanel
-            csrfToken={csrfToken}
-            onSessionExpired={onSessionExpired}
-          />
+          <>
+            <OperationsPanel
+              csrfToken={csrfToken}
+              onSessionExpired={onSessionExpired}
+            />
+            <AuditPanel onSessionExpired={onSessionExpired} />
+          </>
         )}
 
       {logoutState === "error" && (

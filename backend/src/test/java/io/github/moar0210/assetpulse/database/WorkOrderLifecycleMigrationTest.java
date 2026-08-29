@@ -69,6 +69,7 @@ class WorkOrderLifecycleMigrationTest {
         List<String> originalWorkOrders = workOrders(jdbcClient);
         List<String> finalWorkOrders;
         List<String> finalHistory;
+        List<String> finalAudit;
 
         try (ConfigurableApplicationContext application = startApplication()) {
             assertThat(workOrders(jdbcClient)).isEqualTo(originalWorkOrders);
@@ -118,7 +119,10 @@ class WorkOrderLifecycleMigrationTest {
                     .isInstanceOf(DataIntegrityViolationException.class);
             WorkOrderDetailResponse started =
                     service.start(
-                            technician, ASSIGNED_WORK_ORDER_ID, new TransitionWorkOrderRequest(1L));
+                            technician,
+                            ASSIGNED_WORK_ORDER_ID,
+                            new TransitionWorkOrderRequest(1L),
+                            UUID.randomUUID().toString());
             assertThat(started.status()).isEqualTo(WorkOrderStatus.IN_PROGRESS);
             assertThat(started.version()).isEqualTo(2);
             assertThat(started.history()).hasSize(2);
@@ -127,7 +131,10 @@ class WorkOrderLifecycleMigrationTest {
             assertThat(started.history().get(1).transitionedAt()).isEqualTo(started.updatedAt());
             WorkOrderDetailResponse completed =
                     service.complete(
-                            technician, ASSIGNED_WORK_ORDER_ID, new TransitionWorkOrderRequest(2L));
+                            technician,
+                            ASSIGNED_WORK_ORDER_ID,
+                            new TransitionWorkOrderRequest(2L),
+                            UUID.randomUUID().toString());
             assertThat(completed.status()).isEqualTo(WorkOrderStatus.DONE);
             assertThat(completed.version()).isEqualTo(3);
             assertThat(completed.history()).hasSize(3);
@@ -139,18 +146,22 @@ class WorkOrderLifecycleMigrationTest {
                             NORTHSTAR_ID,
                             ADMIN_ID,
                             OPEN_WORK_ORDER_ID,
-                            new AssignWorkOrderRequest(TECHNICIAN_ID, 0L));
+                            new AssignWorkOrderRequest(TECHNICIAN_ID, 0L),
+                            UUID.randomUUID().toString());
             assertThat(newAssignment.history()).hasSize(1);
             assertThat(newAssignment.history().getFirst().actor().id()).isEqualTo(ADMIN_ID);
             assertThat(newAssignment.history().getFirst().transitionedAt())
                     .isEqualTo(newAssignment.updatedAt());
             finalWorkOrders = workOrders(jdbcClient);
             finalHistory = history(jdbcClient);
+            finalAudit = audit(jdbcClient);
+            assertThat(finalAudit).hasSize(3);
         }
 
         try (ConfigurableApplicationContext restarted = startApplication()) {
             assertThat(workOrders(jdbcClient)).isEqualTo(finalWorkOrders);
             assertThat(history(jdbcClient)).isEqualTo(finalHistory);
+            assertThat(audit(jdbcClient)).isEqualTo(finalAudit);
             assertThat(finalHistory).hasSize(5);
             assertThat(
                             restarted
@@ -311,6 +322,14 @@ class WorkOrderLifecycleMigrationTest {
                 SELECT row_to_json(work_order_status_history)::text FROM work_order_status_history
                 ORDER BY organisation_id, work_order_id, sequence_number
                 """)
+                .query(String.class)
+                .list();
+    }
+
+    private List<String> audit(JdbcClient jdbcClient) {
+        return jdbcClient
+                .sql(
+                        "SELECT row_to_json(audit_event)::text FROM audit_event ORDER BY occurred_at, id")
                 .query(String.class)
                 .list();
     }

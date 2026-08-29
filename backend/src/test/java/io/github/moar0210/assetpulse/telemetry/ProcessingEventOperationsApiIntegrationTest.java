@@ -1,6 +1,7 @@
 package io.github.moar0210.assetpulse.telemetry;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.not;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -28,10 +29,12 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.mock.web.MockHttpSession;
@@ -60,6 +63,10 @@ class ProcessingEventOperationsApiIntegrationTest {
             UUID.fromString("00000000-0000-0000-0000-000000000001");
     private static final UUID RIVERSIDE_ID =
             UUID.fromString("00000000-0000-0000-0000-000000000002");
+    private static final UUID NORTHSTAR_ADMIN_ID =
+            UUID.fromString("10000000-0000-0000-0000-000000000001");
+    private static final UUID RIVERSIDE_ADMIN_ID =
+            UUID.fromString("10000000-0000-0000-0000-000000000004");
     private static final UUID NORTHSTAR_SENSOR_ID =
             UUID.fromString("30000000-0000-0000-0000-000000000001");
     private static final UUID NORTHSTAR_DEAD_EVENT_ID =
@@ -106,9 +113,11 @@ class ProcessingEventOperationsApiIntegrationTest {
     @Autowired private JdbcClient jdbcClient;
     @Autowired private TelemetryProcessingLifecycleService lifecycleService;
     @Autowired private TelemetryProcessingExecutionService executionService;
+    @Autowired private ProcessingEventOperationsService operationsService;
 
     @BeforeEach
     void clearTelemetry() {
+        jdbcClient.sql("TRUNCATE TABLE audit_event").update();
         jdbcClient.sql("DELETE FROM telemetry_processing_event").update();
         jdbcClient.sql("DELETE FROM telemetry_reading").update();
         jdbcClient.sql("DELETE FROM telemetry_batch").update();
@@ -293,6 +302,7 @@ class ProcessingEventOperationsApiIntegrationTest {
                 .andExpect(jsonPath("$.code").value("CSRF_REJECTED"));
 
         assertThat(readEvent(NORTHSTAR_DEAD_EVENT_ID).status()).isEqualTo("DEAD");
+        assertThat(retryAuditRows()).isEmpty();
     }
 
     @Test
@@ -333,9 +343,11 @@ class ProcessingEventOperationsApiIntegrationTest {
 
         assertEquivalentProblems(problems.get(0), problems.get(1));
         assertThat(readEvent(RIVERSIDE_DEAD_EVENT_ID).status()).isEqualTo("DEAD");
+        assertThat(retryAuditRows()).isEmpty();
     }
 
     @Test
+    @DisplayName("AUD-01: manual retry audits only the admitted request with trusted attribution")
     void retryRearmsOnlyTheExistingDeadRowAndRepeatedOrNonDeadRetriesConflict() throws Exception {
         insertDeadEvent(
                 NORTHSTAR_DEAD_EVENT_ID,
@@ -362,16 +374,25 @@ class ProcessingEventOperationsApiIntegrationTest {
         AuthenticatedSession admin = login("admin@northstar.example");
         TableCounts before = tableCounts();
 
-        mockMvc.perform(retry(admin, NORTHSTAR_DEAD_EVENT_ID))
-                .andExpect(status().isNoContent())
-                .andExpect(header().string("Cache-Control", "no-store"))
-                .andExpect(content().string(""));
+        MvcResult result =
+                mockMvc.perform(
+                                retry(admin, NORTHSTAR_DEAD_EVENT_ID)
+                                        .header("X-User-ID", RIVERSIDE_ADMIN_ID.toString())
+                                        .header("X-Organisation-ID", RIVERSIDE_ID.toString())
+                                        .header("X-Correlation-ID", "browser-controlled"))
+                        .andExpect(status().isNoContent())
+                        .andExpect(header().string("Cache-Control", "no-store"))
+                        .andExpect(content().string(""))
+                        .andReturn();
 
         ProcessingRow retried = readEvent(NORTHSTAR_DEAD_EVENT_ID);
         assertFreshPending(retried);
         assertThat(retried.nextAttemptAt()).isEqualTo(retried.updatedAt());
         assertThat(retried.updatedAt()).isAfter(DEAD_AT);
         assertThat(tableCounts()).isEqualTo(before);
+        assertRetryAudit(result);
+        List<String> admittedAudit = retryAuditRows();
+        assertThat(admittedAudit).hasSize(1);
 
         for (UUID eventId :
                 List.of(
@@ -391,10 +412,11 @@ class ProcessingEventOperationsApiIntegrationTest {
 
         assertThat(readEvent(NORTHSTAR_DEAD_EVENT_ID)).isEqualTo(retried);
         assertThat(tableCounts()).isEqualTo(before);
+        assertThat(retryAuditRows()).isEqualTo(admittedAudit);
     }
 
     @Test
-    void concurrentRetriesAdmitExactlyOneWinnerAndCreateNoRows() throws Exception {
+    void concurrentRetriesAdmitExactlyOneWinnerAndAuditOnlyThatRequest() throws Exception {
         insertDeadEvent(
                 NORTHSTAR_DEAD_EVENT_ID,
                 NORTHSTAR_DEAD_BATCH_ID,
@@ -436,6 +458,11 @@ class ProcessingEventOperationsApiIntegrationTest {
                     .isEqualTo("no-store");
             JsonNode conflict = payloadWithStatus(results, 409);
             assertThat(conflict.path("code").asText()).isEqualTo("PROCESSING_EVENT_STATE_CONFLICT");
+            assertRetryAudit(
+                    results.stream()
+                            .filter(result -> result.getResponse().getStatus() == 204)
+                            .findFirst()
+                            .orElseThrow());
         } finally {
             start.countDown();
             executor.shutdownNow();
@@ -443,6 +470,41 @@ class ProcessingEventOperationsApiIntegrationTest {
 
         assertFreshPending(readEvent(NORTHSTAR_DEAD_EVENT_ID));
         assertThat(tableCounts()).isEqualTo(before);
+        assertThat(retryAuditRows()).hasSize(1);
+    }
+
+    @Test
+    @DisplayName("AUD-01: an audit insert failure leaves the dead processing event unchanged")
+    void auditInsertFailureRollsBackEveryProcessingRetryField() {
+        insertDeadEvent(
+                NORTHSTAR_DEAD_EVENT_ID,
+                NORTHSTAR_DEAD_BATCH_ID,
+                NORTHSTAR_ID,
+                CREATED_AT,
+                DEAD_AT);
+        ProcessingRow before = readEvent(NORTHSTAR_DEAD_EVENT_ID);
+        TableCounts beforeCounts = tableCounts();
+        jdbcClient
+                .sql(
+                        "ALTER TABLE audit_event ADD CONSTRAINT ck_processing_test_audit CHECK (subject_processing_event_id IS NULL) NOT VALID")
+                .update();
+        try {
+            assertThatThrownBy(
+                            () ->
+                                    operationsService.retryDeadForOrganisation(
+                                            NORTHSTAR_ID,
+                                            NORTHSTAR_ADMIN_ID,
+                                            NORTHSTAR_DEAD_EVENT_ID,
+                                            UUID.randomUUID().toString()))
+                    .isInstanceOf(DataIntegrityViolationException.class);
+            assertThat(readEvent(NORTHSTAR_DEAD_EVENT_ID)).isEqualTo(before);
+            assertThat(tableCounts()).isEqualTo(beforeCounts);
+            assertThat(retryAuditRows()).isEmpty();
+        } finally {
+            jdbcClient
+                    .sql("ALTER TABLE audit_event DROP CONSTRAINT ck_processing_test_audit")
+                    .update();
+        }
     }
 
     @Test
@@ -890,6 +952,38 @@ class ProcessingEventOperationsApiIntegrationTest {
                 .param("eventId", eventId)
                 .query(ProcessingEventOperationsApiIntegrationTest::mapProcessingRow)
                 .single();
+    }
+
+    private void assertRetryAudit(MvcResult result) {
+        UUID correlationId = UUID.fromString(result.getResponse().getHeader("X-Correlation-ID"));
+        assertThat(
+                        jdbcClient
+                                .sql(
+                                        """
+                                        SELECT CONCAT_WS('|', organisation_id, actor_user_id,
+                                            action, subject_processing_event_id, correlation_id)
+                                        FROM audit_event
+                                        WHERE subject_processing_event_id = :eventId
+                                        """)
+                                .param("eventId", NORTHSTAR_DEAD_EVENT_ID)
+                                .query(String.class)
+                                .single())
+                .isEqualTo(
+                        NORTHSTAR_ID
+                                + "|"
+                                + NORTHSTAR_ADMIN_ID
+                                + "|PROCESSING_EVENT_RETRIED|"
+                                + NORTHSTAR_DEAD_EVENT_ID
+                                + "|"
+                                + correlationId);
+    }
+
+    private List<String> retryAuditRows() {
+        return jdbcClient
+                .sql(
+                        "SELECT row_to_json(audit_event)::text FROM audit_event WHERE subject_processing_event_id IS NOT NULL ORDER BY id")
+                .query(String.class)
+                .list();
     }
 
     private static ProcessingRow mapProcessingRow(ResultSet resultSet, int rowNumber)

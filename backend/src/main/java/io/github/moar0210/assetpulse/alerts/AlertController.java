@@ -1,6 +1,8 @@
 package io.github.moar0210.assetpulse.alerts;
 
 import io.github.moar0210.assetpulse.identity.AuthenticatedActor;
+import io.github.moar0210.assetpulse.security.CorrelationIdFilter;
+import jakarta.servlet.http.HttpServletRequest;
 import java.util.UUID;
 import org.springframework.http.CacheControl;
 import org.springframework.http.MediaType;
@@ -59,17 +61,31 @@ public class AlertController {
 
     @PostMapping(path = "/{alertId}/acknowledge", produces = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<AlertDetailResponse> acknowledge(
-            @PathVariable UUID alertId, @AuthenticationPrincipal AuthenticatedActor actor) {
+            @PathVariable UUID alertId,
+            @AuthenticationPrincipal AuthenticatedActor actor,
+            HttpServletRequest request) {
         return ResponseEntity.ok()
                 .cacheControl(CacheControl.noStore())
-                .body(commandService.acknowledge(actor.organisationId(), actor.userId(), alertId));
+                .body(
+                        commandService.acknowledge(
+                                actor.organisationId(),
+                                actor.userId(),
+                                alertId,
+                                CorrelationIdFilter.from(request)));
     }
 
     @PostMapping(path = "/{alertId}/resolve", produces = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<AlertDetailResponse> resolve(
-            @PathVariable UUID alertId, @AuthenticationPrincipal AuthenticatedActor actor) {
+            @PathVariable UUID alertId,
+            @AuthenticationPrincipal AuthenticatedActor actor,
+            HttpServletRequest request) {
         return ResponseEntity.ok()
                 .cacheControl(CacheControl.noStore())
-                .body(commandService.resolve(actor.organisationId(), actor.userId(), alertId));
+                .body(
+                        commandService.resolve(
+                                actor.organisationId(),
+                                actor.userId(),
+                                alertId,
+                                CorrelationIdFilter.from(request)));
     }
 }

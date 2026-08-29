@@ -9,6 +9,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.request;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import io.github.moar0210.assetpulse.audit.AuditService;
 import io.github.moar0210.assetpulse.identity.AuthenticatedActor;
 import io.github.moar0210.assetpulse.identity.DatabaseUserDetailsService;
 import io.github.moar0210.assetpulse.security.ApiProblemWriter;
@@ -47,6 +48,7 @@ class AlertStreamSecurityTest {
     @MockitoBean private AlertQueryService queryService;
     @MockitoBean private AlertCommandService commandService;
     @MockitoBean private DatabaseUserDetailsService userDetailsService;
+    @MockitoBean private AuditService auditService;
 
     @AfterEach
     void closeStreams() {

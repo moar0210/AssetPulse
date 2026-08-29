@@ -1,5 +1,7 @@
 package io.github.moar0210.assetpulse.workorders;
 
+import io.github.moar0210.assetpulse.audit.AuditAction;
+import io.github.moar0210.assetpulse.audit.AuditService;
 import io.github.moar0210.assetpulse.identity.AuthenticatedActor;
 import java.time.Instant;
 import java.util.UUID;
@@ -14,9 +16,11 @@ public class WorkOrderService {
     private static final String TECHNICIAN_ROLE = "TECHNICIAN";
 
     private final WorkOrderRepository repository;
+    private final AuditService auditService;
 
-    public WorkOrderService(WorkOrderRepository repository) {
+    public WorkOrderService(WorkOrderRepository repository, AuditService auditService) {
         this.repository = repository;
+        this.auditService = auditService;
     }
 
     @Transactional(readOnly = true)
@@ -58,7 +62,8 @@ public class WorkOrderService {
     }
 
     @Transactional
-    public WorkOrderDetailResponse create(UUID organisationId, UUID alertId) {
+    public WorkOrderDetailResponse create(
+            UUID organisationId, UUID actorUserId, UUID alertId, String correlationId) {
         UUID workOrderId = UUID.randomUUID();
         int inserted =
                 repository.insertFromAlert(workOrderId, organisationId, alertId, Instant.now());
@@ -68,6 +73,12 @@ public class WorkOrderService {
             }
             throw new WorkOrderSourceAlertNotFoundException();
         }
+        auditService.record(
+                organisationId,
+                actorUserId,
+                AuditAction.WORK_ORDER_CREATED,
+                workOrderId,
+                correlationId);
         return commandDetail(organisationId, workOrderId);
     }
 
@@ -76,7 +87,8 @@ public class WorkOrderService {
             UUID organisationId,
             UUID actorUserId,
             UUID workOrderId,
-            AssignWorkOrderRequest request) {
+            AssignWorkOrderRequest request,
+            String correlationId) {
         if (!repository.workOrderExists(organisationId, workOrderId)) {
             throw new WorkOrderNotFoundException();
         }
@@ -97,29 +109,45 @@ public class WorkOrderService {
             throw new WorkOrderStateConflictException();
         }
         repository.insertHistory(organisationId, workOrderId, WorkOrderStatus.OPEN, actorUserId);
+        auditService.record(
+                organisationId,
+                actorUserId,
+                AuditAction.WORK_ORDER_ASSIGNED,
+                workOrderId,
+                correlationId);
         return commandDetail(organisationId, workOrderId);
     }
 
     @Transactional
     public WorkOrderDetailResponse start(
-            AuthenticatedActor actor, UUID workOrderId, TransitionWorkOrderRequest request) {
+            AuthenticatedActor actor,
+            UUID workOrderId,
+            TransitionWorkOrderRequest request,
+            String correlationId) {
         return transition(
                 actor,
                 workOrderId,
                 request.expectedVersion(),
                 WorkOrderStatus.ASSIGNED,
-                WorkOrderStatus.IN_PROGRESS);
+                WorkOrderStatus.IN_PROGRESS,
+                AuditAction.WORK_ORDER_STARTED,
+                correlationId);
     }
 
     @Transactional
     public WorkOrderDetailResponse complete(
-            AuthenticatedActor actor, UUID workOrderId, TransitionWorkOrderRequest request) {
+            AuthenticatedActor actor,
+            UUID workOrderId,
+            TransitionWorkOrderRequest request,
+            String correlationId) {
         return transition(
                 actor,
                 workOrderId,
                 request.expectedVersion(),
                 WorkOrderStatus.IN_PROGRESS,
-                WorkOrderStatus.DONE);
+                WorkOrderStatus.DONE,
+                AuditAction.WORK_ORDER_COMPLETED,
+                correlationId);
     }
 
     private WorkOrderDetailResponse transition(
@@ -127,7 +155,9 @@ public class WorkOrderService {
             UUID workOrderId,
             long expectedVersion,
             WorkOrderStatus expectedStatus,
-            WorkOrderStatus targetStatus) {
+            WorkOrderStatus targetStatus,
+            AuditAction auditAction,
+            String correlationId) {
         if (!isTechnician(actor)) {
             throw new AccessDeniedException("Only technicians can transition assigned work");
         }
@@ -153,6 +183,8 @@ public class WorkOrderService {
 
         repository.insertHistory(
                 actor.organisationId(), workOrderId, expectedStatus, actor.userId());
+        auditService.record(
+                actor.organisationId(), actor.userId(), auditAction, workOrderId, correlationId);
         return commandDetail(actor.organisationId(), workOrderId);
     }
 

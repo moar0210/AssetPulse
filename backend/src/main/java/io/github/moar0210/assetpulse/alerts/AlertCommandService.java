@@ -1,5 +1,7 @@
 package io.github.moar0210.assetpulse.alerts;
 
+import io.github.moar0210.assetpulse.audit.AuditAction;
+import io.github.moar0210.assetpulse.audit.AuditService;
 import java.time.Instant;
 import java.util.UUID;
 import org.springframework.stereotype.Service;
@@ -11,36 +13,45 @@ public class AlertCommandService {
     private final AlertCommandRepository commandRepository;
     private final AlertQueryRepository queryRepository;
     private final AlertChangePublisher changePublisher;
+    private final AuditService auditService;
 
     public AlertCommandService(
             AlertCommandRepository commandRepository,
             AlertQueryRepository queryRepository,
-            AlertChangePublisher changePublisher) {
+            AlertChangePublisher changePublisher,
+            AuditService auditService) {
         this.commandRepository = commandRepository;
         this.queryRepository = queryRepository;
         this.changePublisher = changePublisher;
+        this.auditService = auditService;
     }
 
     @Transactional
-    public AlertDetailResponse acknowledge(UUID organisationId, UUID actorUserId, UUID alertId) {
+    public AlertDetailResponse acknowledge(
+            UUID organisationId, UUID actorUserId, UUID alertId, String correlationId) {
         return transition(
                 organisationId,
                 actorUserId,
                 alertId,
                 AlertStatus.OPEN,
                 AlertStatus.ACKNOWLEDGED,
-                1);
+                1,
+                AuditAction.ALERT_ACKNOWLEDGED,
+                correlationId);
     }
 
     @Transactional
-    public AlertDetailResponse resolve(UUID organisationId, UUID actorUserId, UUID alertId) {
+    public AlertDetailResponse resolve(
+            UUID organisationId, UUID actorUserId, UUID alertId, String correlationId) {
         return transition(
                 organisationId,
                 actorUserId,
                 alertId,
                 AlertStatus.ACKNOWLEDGED,
                 AlertStatus.RESOLVED,
-                2);
+                2,
+                AuditAction.ALERT_RESOLVED,
+                correlationId);
     }
 
     private AlertDetailResponse transition(
@@ -49,7 +60,9 @@ public class AlertCommandService {
             UUID alertId,
             AlertStatus expectedStatus,
             AlertStatus targetStatus,
-            int sequenceNumber) {
+            int sequenceNumber,
+            AuditAction auditAction,
+            String correlationId) {
         if (!expectedStatus.canTransitionTo(targetStatus)) {
             throw new IllegalArgumentException("Unsupported alert status transition");
         }
@@ -75,6 +88,7 @@ public class AlertCommandService {
                 targetStatus,
                 actorUserId,
                 transitionedAt);
+        auditService.record(organisationId, actorUserId, auditAction, alertId, correlationId);
         AlertDetailResponse response =
                 queryRepository
                         .findByOrganisationIdAndId(organisationId, alertId)

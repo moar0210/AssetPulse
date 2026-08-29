@@ -28,6 +28,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
@@ -120,6 +121,7 @@ class WorkOrderApiIntegrationTest {
 
     @BeforeEach
     void clearWorkOrderFixtures() {
+        jdbcClient.sql("TRUNCATE TABLE audit_event").update();
         jdbcClient.sql("TRUNCATE TABLE work_order_status_history").update();
         jdbcClient.sql("DELETE FROM work_order").update();
         jdbcClient.sql("TRUNCATE TABLE alert_status_history").update();
@@ -137,6 +139,8 @@ class WorkOrderApiIntegrationTest {
                                 create(admin, NORTHSTAR_ALERT_ONE_ID)
                                         .queryParam("organisationId", RIVERSIDE_ID.toString())
                                         .header("X-Organisation-ID", RIVERSIDE_ID.toString())
+                                        .header("X-User-ID", RIVERSIDE_ADMIN_ID.toString())
+                                        .header("X-Correlation-ID", "browser-controlled")
                                         .header("X-Role", "VIEWER"))
                         .andExpect(status().isCreated())
                         .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
@@ -172,6 +176,8 @@ class WorkOrderApiIntegrationTest {
                                 .query(String.class)
                                 .single())
                 .isEqualTo(NORTHSTAR_ID + "|" + NORTHSTAR_ALERT_ONE_ID + "|OPEN|0|-|-");
+        assertWorkOrderAudit(result, workOrderId, "WORK_ORDER_CREATED", NORTHSTAR_ADMIN_ID);
+        assertThat(workOrderAuditRows()).hasSize(1);
     }
 
     @Test
@@ -224,11 +230,22 @@ class WorkOrderApiIntegrationTest {
                                     .path("code")
                                     .asText())
                     .isEqualTo("WORK_ORDER_ALREADY_EXISTS");
+            MvcResult created =
+                    results.stream()
+                            .filter(result -> result.getResponse().getStatus() == 201)
+                            .findFirst()
+                            .orElseThrow();
+            assertWorkOrderAudit(
+                    created,
+                    UUID.fromString(payload(created).path("id").asText()),
+                    "WORK_ORDER_CREATED",
+                    NORTHSTAR_ADMIN_ID);
         }
 
         assertThat(count("work_order")).isOne();
         problem(create(firstAdmin, NORTHSTAR_ALERT_ONE_ID), 409, "WORK_ORDER_ALREADY_EXISTS");
         assertThat(count("work_order")).isOne();
+        assertThat(workOrderAuditRows()).hasSize(1);
     }
 
     @Test
@@ -471,10 +488,13 @@ class WorkOrderApiIntegrationTest {
         MvcResult result =
                 mockMvc.perform(
                                 assign(
-                                        admin,
-                                        NORTHSTAR_WORK_ORDER_ONE_ID,
-                                        NORTHSTAR_TECHNICIAN_ID,
-                                        0L))
+                                                admin,
+                                                NORTHSTAR_WORK_ORDER_ONE_ID,
+                                                NORTHSTAR_TECHNICIAN_ID,
+                                                0L)
+                                        .header("X-User-ID", RIVERSIDE_ADMIN_ID.toString())
+                                        .header("X-Organisation-ID", RIVERSIDE_ID.toString())
+                                        .header("X-Correlation-ID", "browser-controlled"))
                         .andExpect(status().isOk())
                         .andExpect(header().string("Cache-Control", "no-store"))
                         .andReturn();
@@ -491,6 +511,8 @@ class WorkOrderApiIntegrationTest {
                 NORTHSTAR_ADMIN_ID,
                 "Nora Admin",
                 assigned.path("updatedAt").asText());
+        assertWorkOrderAudit(
+                result, NORTHSTAR_WORK_ORDER_ONE_ID, "WORK_ORDER_ASSIGNED", NORTHSTAR_ADMIN_ID);
 
         String rowAfterSuccess = assignmentState(NORTHSTAR_WORK_ORDER_ONE_ID);
         problem(
@@ -499,6 +521,7 @@ class WorkOrderApiIntegrationTest {
                 "WORK_ORDER_STATE_CONFLICT");
         assertThat(assignmentState(NORTHSTAR_WORK_ORDER_ONE_ID)).isEqualTo(rowAfterSuccess);
         assertThat(count("work_order_status_history")).isOne();
+        assertThat(workOrderAuditRows()).hasSize(1);
     }
 
     @Test
@@ -577,9 +600,11 @@ class WorkOrderApiIntegrationTest {
                 .andExpect(jsonPath("$.code").value("AUTHENTICATION_REQUIRED"));
         assertThat(count("work_order")).isOne();
         assertOpenUnchanged(NORTHSTAR_WORK_ORDER_ONE_ID);
+        assertThat(workOrderAuditRows()).isEmpty();
     }
 
     @Test
+    @DisplayName("AUD-01: owned work-order transitions audit their trusted technician and request")
     void assignedTechnicianCompletesTheVersionedLifecycleWithAnImmutableChronologicalHistory()
             throws Exception {
         insertAlert(NORTHSTAR_ALERT_ONE_ID, NORTHSTAR_ID, NORTHSTAR_RULE_ONE_ID, "OPEN", 1);
@@ -597,17 +622,16 @@ class WorkOrderApiIntegrationTest {
                                                 0L))
                                 .andExpect(status().isOk())
                                 .andReturn());
-        JsonNode started =
-                payload(
-                        mockMvc.perform(
-                                        command(
-                                                technician,
-                                                NORTHSTAR_WORK_ORDER_ONE_ID,
-                                                "start",
-                                                1))
-                                .andExpect(status().isOk())
-                                .andExpect(header().string("Cache-Control", "no-store"))
-                                .andReturn());
+        MvcResult startedResult =
+                mockMvc.perform(
+                                command(technician, NORTHSTAR_WORK_ORDER_ONE_ID, "start", 1)
+                                        .header("X-User-ID", NORTHSTAR_ADMIN_ID.toString())
+                                        .header("X-Organisation-ID", RIVERSIDE_ID.toString())
+                                        .header("X-Correlation-ID", "browser-controlled"))
+                        .andExpect(status().isOk())
+                        .andExpect(header().string("Cache-Control", "no-store"))
+                        .andReturn();
+        JsonNode started = payload(startedResult);
         assertExactWorkOrder(
                 started,
                 NORTHSTAR_WORK_ORDER_ONE_ID,
@@ -625,18 +649,22 @@ class WorkOrderApiIntegrationTest {
                 NORTHSTAR_TECHNICIAN_ID,
                 "Theo Technician",
                 started.path("updatedAt").asText());
+        assertWorkOrderAudit(
+                startedResult,
+                NORTHSTAR_WORK_ORDER_ONE_ID,
+                "WORK_ORDER_STARTED",
+                NORTHSTAR_TECHNICIAN_ID);
 
-        JsonNode completed =
-                payload(
-                        mockMvc.perform(
-                                        command(
-                                                technician,
-                                                NORTHSTAR_WORK_ORDER_ONE_ID,
-                                                "complete",
-                                                2))
-                                .andExpect(status().isOk())
-                                .andExpect(header().string("Cache-Control", "no-store"))
-                                .andReturn());
+        MvcResult completedResult =
+                mockMvc.perform(
+                                command(technician, NORTHSTAR_WORK_ORDER_ONE_ID, "complete", 2)
+                                        .header("X-User-ID", NORTHSTAR_ADMIN_ID.toString())
+                                        .header("X-Organisation-ID", RIVERSIDE_ID.toString())
+                                        .header("X-Correlation-ID", "browser-controlled"))
+                        .andExpect(status().isOk())
+                        .andExpect(header().string("Cache-Control", "no-store"))
+                        .andReturn();
+        JsonNode completed = payload(completedResult);
         assertExactWorkOrder(
                 completed, NORTHSTAR_WORK_ORDER_ONE_ID, NORTHSTAR_ALERT_ONE_ID, "DONE", 3, true);
         assertThat(completed.path("history")).hasSize(3);
@@ -650,6 +678,12 @@ class WorkOrderApiIntegrationTest {
                 NORTHSTAR_TECHNICIAN_ID,
                 "Theo Technician",
                 completed.path("updatedAt").asText());
+        assertWorkOrderAudit(
+                completedResult,
+                NORTHSTAR_WORK_ORDER_ONE_ID,
+                "WORK_ORDER_COMPLETED",
+                NORTHSTAR_TECHNICIAN_ID);
+        assertThat(workOrderAuditRows()).hasSize(3);
         assertThat(Instant.parse(started.path("updatedAt").asText()))
                 .isAfterOrEqualTo(Instant.parse(assigned.path("updatedAt").asText()));
         assertThat(Instant.parse(completed.path("updatedAt").asText()))
@@ -944,20 +978,27 @@ class WorkOrderApiIntegrationTest {
                 assign(firstAdmin, NORTHSTAR_WORK_ORDER_ONE_ID, NORTHSTAR_TECHNICIAN_ID, 0L),
                 assign(secondAdmin, NORTHSTAR_WORK_ORDER_ONE_ID, NORTHSTAR_TECHNICIAN_ID, 0L),
                 "ASSIGNED",
-                1);
+                1,
+                "WORK_ORDER_ASSIGNED",
+                NORTHSTAR_ADMIN_ID);
         AuthenticatedSession firstTechnician = login("technician@northstar.example");
         AuthenticatedSession secondTechnician = login("technician@northstar.example");
         assertConcurrentWinner(
                 command(firstTechnician, NORTHSTAR_WORK_ORDER_ONE_ID, "start", 1),
                 command(secondTechnician, NORTHSTAR_WORK_ORDER_ONE_ID, "start", 1),
                 "IN_PROGRESS",
-                2);
+                2,
+                "WORK_ORDER_STARTED",
+                NORTHSTAR_TECHNICIAN_ID);
         assertConcurrentWinner(
                 command(firstTechnician, NORTHSTAR_WORK_ORDER_ONE_ID, "complete", 2),
                 command(secondTechnician, NORTHSTAR_WORK_ORDER_ONE_ID, "complete", 2),
                 "DONE",
-                3);
+                3,
+                "WORK_ORDER_COMPLETED",
+                NORTHSTAR_TECHNICIAN_ID);
         assertThat(count("work_order_status_history")).isEqualTo(3);
+        assertThat(workOrderAuditRows()).hasSize(3);
     }
 
     @Test
@@ -972,10 +1013,12 @@ class WorkOrderApiIntegrationTest {
                                         NORTHSTAR_ID,
                                         RIVERSIDE_ADMIN_ID,
                                         NORTHSTAR_WORK_ORDER_ONE_ID,
-                                        new AssignWorkOrderRequest(NORTHSTAR_TECHNICIAN_ID, 0L)))
+                                        new AssignWorkOrderRequest(NORTHSTAR_TECHNICIAN_ID, 0L),
+                                        UUID.randomUUID().toString()))
                 .isInstanceOf(DataIntegrityViolationException.class);
         assertThat(assignmentState(NORTHSTAR_WORK_ORDER_ONE_ID)).isEqualTo(before);
         assertThat(count("work_order_status_history")).isZero();
+        assertThat(workOrderAuditRows()).isEmpty();
     }
 
     @Test
@@ -992,6 +1035,7 @@ class WorkOrderApiIntegrationTest {
                         userDetailsService.loadUserByUsername("technician@northstar.example");
         for (int sequenceNumber : List.of(2, 3)) {
             String before = assignmentState(NORTHSTAR_WORK_ORDER_ONE_ID);
+            List<String> beforeAudit = workOrderAuditRows();
             jdbcClient
                     .sql(
                             "ALTER TABLE work_order_status_history ADD CONSTRAINT ck_work_order_test_history CHECK (sequence_number < "
@@ -1005,17 +1049,20 @@ class WorkOrderApiIntegrationTest {
                                         workOrderService.start(
                                                 actor,
                                                 NORTHSTAR_WORK_ORDER_ONE_ID,
-                                                new TransitionWorkOrderRequest(1L));
+                                                new TransitionWorkOrderRequest(1L),
+                                                UUID.randomUUID().toString());
                                     } else {
                                         workOrderService.complete(
                                                 actor,
                                                 NORTHSTAR_WORK_ORDER_ONE_ID,
-                                                new TransitionWorkOrderRequest(2L));
+                                                new TransitionWorkOrderRequest(2L),
+                                                UUID.randomUUID().toString());
                                     }
                                 })
                         .isInstanceOf(DataIntegrityViolationException.class);
                 assertThat(assignmentState(NORTHSTAR_WORK_ORDER_ONE_ID)).isEqualTo(before);
                 assertThat(count("work_order_status_history")).isEqualTo(sequenceNumber - 1);
+                assertThat(workOrderAuditRows()).isEqualTo(beforeAudit);
             } finally {
                 jdbcClient
                         .sql(
@@ -1024,9 +1071,73 @@ class WorkOrderApiIntegrationTest {
             }
             if (sequenceNumber == 2) {
                 workOrderService.start(
-                        actor, NORTHSTAR_WORK_ORDER_ONE_ID, new TransitionWorkOrderRequest(1L));
+                        actor,
+                        NORTHSTAR_WORK_ORDER_ONE_ID,
+                        new TransitionWorkOrderRequest(1L),
+                        UUID.randomUUID().toString());
             }
         }
+    }
+
+    @Test
+    @DisplayName("AUD-01: audit failures roll back work-order creation, assignment and transitions")
+    void auditInsertFailuresRollBackCreationAssignmentAndOwnedTransitions() {
+        insertAlert(NORTHSTAR_ALERT_ONE_ID, NORTHSTAR_ID, NORTHSTAR_RULE_ONE_ID, "OPEN", 1);
+        AuthenticatedActor technician =
+                (AuthenticatedActor)
+                        userDetailsService.loadUserByUsername("technician@northstar.example");
+
+        assertAuditFailureRollsBackWorkOrder(
+                () ->
+                        workOrderService.create(
+                                NORTHSTAR_ID,
+                                NORTHSTAR_ADMIN_ID,
+                                NORTHSTAR_ALERT_ONE_ID,
+                                UUID.randomUUID().toString()));
+        UUID workOrderId =
+                workOrderService
+                        .create(
+                                NORTHSTAR_ID,
+                                NORTHSTAR_ADMIN_ID,
+                                NORTHSTAR_ALERT_ONE_ID,
+                                UUID.randomUUID().toString())
+                        .id();
+
+        assertAuditFailureRollsBackWorkOrder(
+                () ->
+                        workOrderService.assign(
+                                NORTHSTAR_ID,
+                                NORTHSTAR_ADMIN_ID,
+                                workOrderId,
+                                new AssignWorkOrderRequest(NORTHSTAR_TECHNICIAN_ID, 0L),
+                                UUID.randomUUID().toString()));
+        workOrderService.assign(
+                NORTHSTAR_ID,
+                NORTHSTAR_ADMIN_ID,
+                workOrderId,
+                new AssignWorkOrderRequest(NORTHSTAR_TECHNICIAN_ID, 0L),
+                UUID.randomUUID().toString());
+
+        assertAuditFailureRollsBackWorkOrder(
+                () ->
+                        workOrderService.start(
+                                technician,
+                                workOrderId,
+                                new TransitionWorkOrderRequest(1L),
+                                UUID.randomUUID().toString()));
+        workOrderService.start(
+                technician,
+                workOrderId,
+                new TransitionWorkOrderRequest(1L),
+                UUID.randomUUID().toString());
+
+        assertAuditFailureRollsBackWorkOrder(
+                () ->
+                        workOrderService.complete(
+                                technician,
+                                workOrderId,
+                                new TransitionWorkOrderRequest(2L),
+                                UUID.randomUUID().toString()));
     }
 
     @Test
@@ -1103,7 +1214,9 @@ class WorkOrderApiIntegrationTest {
             MockHttpServletRequestBuilder firstRequest,
             MockHttpServletRequestBuilder secondRequest,
             String expectedStatus,
-            int expectedVersion)
+            int expectedVersion,
+            String expectedAuditAction,
+            UUID expectedActorId)
             throws Exception {
         CountDownLatch ready = new CountDownLatch(2);
         CountDownLatch start = new CountDownLatch(1);
@@ -1126,12 +1239,18 @@ class WorkOrderApiIntegrationTest {
                         assertThat(response.path("status").asText()).isEqualTo(expectedStatus);
                         assertThat(response.path("version").asInt()).isEqualTo(expectedVersion);
                         assertThat(response.path("history")).hasSize(expectedVersion);
+                        assertWorkOrderAudit(
+                                result,
+                                NORTHSTAR_WORK_ORDER_ONE_ID,
+                                expectedAuditAction,
+                                expectedActorId);
                     } else {
                         assertThat(response.path("code").asText())
                                 .isEqualTo("WORK_ORDER_STATE_CONFLICT");
                     }
                 }
                 assertThat(count("work_order_status_history")).isEqualTo(expectedVersion);
+                assertThat(workOrderAuditRows()).hasSize(expectedVersion);
             } finally {
                 start.countDown();
             }
@@ -1154,6 +1273,70 @@ class WorkOrderApiIntegrationTest {
                 .sql("SELECT row_to_json(work_order)::text FROM work_order ORDER BY id")
                 .query(String.class)
                 .list();
+    }
+
+    private void assertAuditFailureRollsBackWorkOrder(Runnable command) {
+        List<String> beforeWorkOrders = workOrderRows();
+        List<String> beforeHistory = workOrderHistoryRows();
+        List<String> beforeAudit = workOrderAuditRows();
+        jdbcClient
+                .sql(
+                        "ALTER TABLE audit_event ADD CONSTRAINT ck_work_order_test_audit CHECK (subject_work_order_id IS NULL) NOT VALID")
+                .update();
+        try {
+            assertThatThrownBy(command::run).isInstanceOf(DataIntegrityViolationException.class);
+            assertThat(workOrderRows()).isEqualTo(beforeWorkOrders);
+            assertThat(workOrderHistoryRows()).isEqualTo(beforeHistory);
+            assertThat(workOrderAuditRows()).isEqualTo(beforeAudit);
+        } finally {
+            jdbcClient
+                    .sql("ALTER TABLE audit_event DROP CONSTRAINT ck_work_order_test_audit")
+                    .update();
+        }
+    }
+
+    private List<String> workOrderHistoryRows() {
+        return jdbcClient
+                .sql(
+                        "SELECT row_to_json(work_order_status_history)::text FROM work_order_status_history ORDER BY work_order_id, sequence_number")
+                .query(String.class)
+                .list();
+    }
+
+    private List<String> workOrderAuditRows() {
+        return jdbcClient
+                .sql(
+                        "SELECT row_to_json(audit_event)::text FROM audit_event WHERE subject_work_order_id IS NOT NULL ORDER BY id")
+                .query(String.class)
+                .list();
+    }
+
+    private void assertWorkOrderAudit(
+            MvcResult result, UUID workOrderId, String action, UUID actorId) {
+        UUID correlationId = UUID.fromString(result.getResponse().getHeader("X-Correlation-ID"));
+        assertThat(
+                        jdbcClient
+                                .sql(
+                                        """
+                                        SELECT CONCAT_WS('|', organisation_id, actor_user_id,
+                                            action, subject_work_order_id, correlation_id)
+                                        FROM audit_event
+                                        WHERE subject_work_order_id = :workOrderId AND action = :action
+                                        """)
+                                .param("workOrderId", workOrderId)
+                                .param("action", action)
+                                .query(String.class)
+                                .single())
+                .isEqualTo(
+                        NORTHSTAR_ID
+                                + "|"
+                                + actorId
+                                + "|"
+                                + action
+                                + "|"
+                                + workOrderId
+                                + "|"
+                                + correlationId);
     }
 
     private JsonNode payload(MvcResult result) throws Exception {
@@ -1270,6 +1453,7 @@ class WorkOrderApiIntegrationTest {
     private JsonNode problem(
             MockHttpServletRequestBuilder request, int expectedStatus, String expectedCode)
             throws Exception {
+        List<String> beforeAudit = workOrderAuditRows();
         MvcResult result =
                 mockMvc.perform(request)
                         .andExpect(status().is(expectedStatus))
@@ -1286,6 +1470,7 @@ class WorkOrderApiIntegrationTest {
                     .isEqualTo(
                             "The work order cannot be changed from its current state and version.");
         }
+        assertThat(workOrderAuditRows()).isEqualTo(beforeAudit);
         return response;
     }
 
