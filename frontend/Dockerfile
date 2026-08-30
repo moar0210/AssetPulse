@@ -12,11 +12,15 @@ RUN npm run build
 
 FROM nginx:1.29.8-alpine3.23 AS runtime
 
-COPY nginx.conf /etc/nginx/nginx.conf
+ENV BACKEND_UPSTREAM=backend:8080 \
+    NGINX_ENVSUBST_FILTER=^BACKEND_UPSTREAM$ \
+    NGINX_ENVSUBST_OUTPUT_DIR=/tmp
+
+COPY nginx.conf /etc/nginx/templates/nginx.conf.template
 COPY --from=build --chown=nginx:nginx /workspace/dist /usr/share/nginx/html
 
 USER nginx
 
 EXPOSE 8080
 
-CMD ["nginx", "-g", "daemon off;"]
+CMD ["nginx", "-c", "/tmp/nginx.conf", "-g", "daemon off;"]
