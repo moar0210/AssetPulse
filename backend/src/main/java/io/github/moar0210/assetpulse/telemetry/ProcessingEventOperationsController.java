@@ -1,6 +1,8 @@
 package io.github.moar0210.assetpulse.telemetry;
 
 import io.github.moar0210.assetpulse.identity.AuthenticatedActor;
+import io.github.moar0210.assetpulse.security.CorrelationIdFilter;
+import jakarta.servlet.http.HttpServletRequest;
 import java.util.UUID;
 import org.springframework.http.CacheControl;
 import org.springframework.http.MediaType;
@@ -35,8 +37,11 @@ public class ProcessingEventOperationsController {
 
     @PostMapping("/{eventId}/retry")
     public ResponseEntity<Void> retry(
-            @PathVariable UUID eventId, @AuthenticationPrincipal AuthenticatedActor actor) {
-        operationsService.retryDeadForOrganisation(actor.organisationId(), eventId);
+            @PathVariable UUID eventId,
+            @AuthenticationPrincipal AuthenticatedActor actor,
+            HttpServletRequest request) {
+        operationsService.retryDeadForOrganisation(
+                actor.organisationId(), actor.userId(), eventId, CorrelationIdFilter.from(request));
         return ResponseEntity.noContent().cacheControl(CacheControl.noStore()).build();
     }
 }

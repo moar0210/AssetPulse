@@ -15,6 +15,7 @@ import org.springframework.stereotype.Repository;
 public class WorkOrderRepository {
 
     private static final int ELIGIBLE_TECHNICIAN_LIMIT = 100;
+    private static final int HISTORY_LIMIT = 3;
 
     private static final String WORK_ORDER_COLUMNS =
             """
@@ -159,6 +160,62 @@ public class WorkOrderRepository {
               AND version = :expectedVersion
             """;
 
+    private static final String TRANSITION =
+            """
+            UPDATE work_order
+            SET status = :targetStatus,
+                version = version + 1,
+                updated_at = GREATEST(updated_at, :transitionedAt)
+            WHERE organisation_id = :organisationId
+              AND id = :workOrderId
+              AND assigned_technician_user_id = :technicianUserId
+              AND status = :expectedStatus
+              AND version = :expectedVersion
+            """;
+
+    private static final String INSERT_HISTORY =
+            """
+            INSERT INTO work_order_status_history (
+                organisation_id,
+                work_order_id,
+                sequence_number,
+                from_status,
+                to_status,
+                actor_user_id,
+                transitioned_at
+            )
+            SELECT
+                organisation_id,
+                id,
+                version,
+                :fromStatus,
+                status,
+                :actorUserId,
+                updated_at
+            FROM work_order
+            WHERE organisation_id = :organisationId
+              AND id = :workOrderId
+            """;
+
+    private static final String FIND_HISTORY =
+            """
+            SELECT
+                history.sequence_number,
+                history.from_status,
+                history.to_status,
+                history.actor_user_id,
+                actor.display_name AS actor_display_name,
+                history.transitioned_at
+            FROM work_order_status_history history
+            LEFT JOIN app_user actor
+              ON actor.organisation_id = history.organisation_id
+             AND actor.id = history.actor_user_id
+            WHERE history.organisation_id = :organisationId
+              AND history.work_order_id = :workOrderId
+            ORDER BY history.sequence_number
+            LIMIT :limit
+            """;
+
     private final JdbcClient jdbcClient;
 
     public WorkOrderRepository(JdbcClient jdbcClient) {
@@ -271,6 +328,66 @@ public class WorkOrderRepository {
                 .param("expectedVersion", expectedVersion)
                 .param("assignedAt", assignedAt.atOffset(ZoneOffset.UTC))
                 .update();
+    }
+
+    public int transition(
+            UUID organisationId,
+            UUID workOrderId,
+            UUID technicianUserId,
+            long expectedVersion,
+            WorkOrderStatus expectedStatus,
+            WorkOrderStatus targetStatus,
+            Instant transitionedAt) {
+        return jdbcClient
+                .sql(TRANSITION)
+                .param("organisationId", organisationId)
+                .param("workOrderId", workOrderId)
+                .param("technicianUserId", technicianUserId)
+                .param("expectedVersion", expectedVersion)
+                .param("expectedStatus", expectedStatus.name())
+                .param("targetStatus", targetStatus.name())
+                .param("transitionedAt", transitionedAt.atOffset(ZoneOffset.UTC))
+                .update();
+    }
+
+    public void insertHistory(
+            UUID organisationId, UUID workOrderId, WorkOrderStatus fromStatus, UUID actorUserId) {
+        int inserted =
+                jdbcClient
+                        .sql(INSERT_HISTORY)
+                        .param("organisationId", organisationId)
+                        .param("workOrderId", workOrderId)
+                        .param("fromStatus", fromStatus.name())
+                        .param("actorUserId", actorUserId)
+                        .update();
+        if (inserted != 1) {
+            throw new IllegalStateException("Work-order status history was not recorded");
+        }
+    }
+
+    public List<WorkOrderHistoryResponse> findHistory(UUID organisationId, UUID workOrderId) {
+        return jdbcClient
+                .sql(FIND_HISTORY)
+                .param("organisationId", organisationId)
+                .param("workOrderId", workOrderId)
+                .param("limit", HISTORY_LIMIT)
+                .query(
+                        (resultSet, rowNumber) -> {
+                            UUID actorId = resultSet.getObject("actor_user_id", UUID.class);
+                            WorkOrderHistoryResponse.ActorResponse actor =
+                                    actorId == null
+                                            ? null
+                                            : new WorkOrderHistoryResponse.ActorResponse(
+                                                    actorId,
+                                                    resultSet.getString("actor_display_name"));
+                            return new WorkOrderHistoryResponse(
+                                    resultSet.getInt("sequence_number"),
+                                    WorkOrderStatus.valueOf(resultSet.getString("from_status")),
+                                    WorkOrderStatus.valueOf(resultSet.getString("to_status")),
+                                    actor,
+                                    instant(resultSet, "transitioned_at"));
+                        })
+                .list();
     }
 
     private static WorkOrderResponse mapWorkOrder(ResultSet resultSet, int rowNumber)

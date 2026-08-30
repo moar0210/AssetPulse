@@ -2,11 +2,13 @@ import { useCallback, useEffect, useId, useRef, useState } from "react";
 
 import {
   assignWorkOrder,
+  completeWorkOrder,
   DEFAULT_WORK_ORDER_LIMIT,
   getEligibleTechnicians,
   getWorkOrderDetail,
   getWorkOrders,
   InvalidWorkOrderAssigneeError,
+  startWorkOrder,
   WorkOrderCommandUncertainError,
   WorkOrderForbiddenError,
   WorkOrderNotFoundError,
@@ -17,6 +19,7 @@ import {
 import type {
   EligibleTechnicianList,
   WorkOrder,
+  WorkOrderDetail,
   WorkOrderList,
   WorkOrderStatus,
 } from "./api/workOrders";
@@ -36,7 +39,7 @@ type DetailState =
   | Readonly<{ kind: "loading" }>
   | Readonly<{
       kind: "ready";
-      workOrder: WorkOrder;
+      workOrder: WorkOrderDetail;
       refreshFailed: boolean;
     }>
   | Readonly<{ kind: "not-found" }>
@@ -51,6 +54,7 @@ type TechnicianState =
 
 type ActionState = "idle" | "submitting" | "recovering" | "recovery-failed";
 type RecoveryReason = "conflict" | "uncertain";
+type WorkOrderCommand = "assign" | "start" | "complete";
 type Feedback = Readonly<{
   kind: "success" | "conflict" | "uncertain" | "invalid";
   message: string;
@@ -61,7 +65,17 @@ const API_TIMEOUT_MS = 5_000;
 const statusLabels: Record<WorkOrderStatus, string> = {
   OPEN: "Open",
   ASSIGNED: "Assigned",
+  IN_PROGRESS: "In progress",
+  DONE: "Done",
 };
+
+function isAssignedTechnician(workOrder: WorkOrder, identity: SessionIdentity) {
+  return (
+    identity.role.code === "TECHNICIAN" &&
+    workOrder.assignedTechnician?.id.toLowerCase() ===
+      identity.userId.toLowerCase()
+  );
+}
 
 function formatTimestamp(value: string) {
   return new Intl.DateTimeFormat(undefined, {
@@ -111,7 +125,9 @@ function WorkOrderDetailPanel({
   const requestSequence = useRef(0);
   const mounted = useRef(true);
   const recoveryReason = useRef<RecoveryReason>("uncertain");
+  const recoveryInFlight = useRef(false);
   const detailFocus = useRef<HTMLElement | null>(null);
+  const feedbackFocus = useRef<HTMLParagraphElement | null>(null);
 
   const cancelDetailRead = useCallback(() => {
     requestSequence.current += 1;
@@ -166,7 +182,7 @@ function WorkOrderDetailPanel({
   const readDetail = useCallback(
     async function requestDetail(
       showLoading: boolean,
-    ): Promise<"success" | "failed" | "terminal" | "superseded"> {
+    ): Promise<"success" | "failed" | "terminal" | "expired" | "superseded"> {
       cancelDetailRead();
       const sequence = requestSequence.current + 1;
       requestSequence.current = sequence;
@@ -186,12 +202,11 @@ function WorkOrderDetailPanel({
           workOrderId,
           controller.signal,
         );
-        if (
-          !mounted.current ||
-          requestSequence.current !== sequence ||
-          controller.signal.aborted
-        ) {
+        if (!mounted.current || requestSequence.current !== sequence) {
           return "superseded";
+        }
+        if (controller.signal.aborted) {
+          throw new Error("The work-order detail request timed out");
         }
         setDetailState({ kind: "ready", workOrder, refreshFailed: false });
         return "success";
@@ -201,7 +216,7 @@ function WorkOrderDetailPanel({
         }
         if (error instanceof WorkOrderSessionExpiredError) {
           onSessionExpired();
-          return "terminal";
+          return "expired";
         }
         if (error instanceof WorkOrderNotFoundError) {
           setDetailState({ kind: "not-found" });
@@ -250,19 +265,36 @@ function WorkOrderDetailPanel({
     }
   }, [detailState, identity.role.code, readTechnicians, technicianState.kind]);
 
+  useEffect(() => {
+    if (detailState.kind === "not-found" || detailState.kind === "forbidden") {
+      detailFocus.current?.focus();
+    } else if (feedback !== null) {
+      feedbackFocus.current?.focus();
+    }
+  }, [detailState.kind, feedback]);
+
   const recoverLatest = useCallback(
     async (reason: RecoveryReason) => {
+      if (recoveryInFlight.current) {
+        return;
+      }
+      recoveryInFlight.current = true;
       recoveryReason.current = reason;
       setActionState("recovering");
       setFeedback({
         kind: reason,
         message:
           reason === "conflict"
-            ? "This work order changed before assignment was accepted. Loading the latest saved state."
-            : "The assignment result could not be confirmed. Loading the latest saved state.",
+            ? "The server rejected this update because it accepted another client's change first. Loading the latest saved state."
+            : "The work-order update result could not be confirmed. Loading the latest saved state.",
       });
       const outcome = await readDetail(false);
-      if (!mounted.current || outcome === "superseded") {
+      recoveryInFlight.current = false;
+      if (
+        !mounted.current ||
+        outcome === "superseded" ||
+        outcome === "expired"
+      ) {
         return;
       }
       if (outcome === "terminal") {
@@ -275,8 +307,8 @@ function WorkOrderDetailPanel({
           kind: reason,
           message:
             reason === "conflict"
-              ? "This work order changed, but its latest saved state could not be loaded. Retry latest state before assigning again."
-              : "The assignment result and latest saved state could not be confirmed. Retry latest state before assigning again.",
+              ? "The server accepted another client's change first, but the latest saved state could not be loaded. This update was not retried. Retry latest state before making another change."
+              : "The work-order update result and latest saved state could not be confirmed. Retry latest state before making another change.",
         });
         return;
       }
@@ -285,19 +317,30 @@ function WorkOrderDetailPanel({
         kind: reason,
         message:
           reason === "conflict"
-            ? "This work order changed in another client. The latest saved state is now loaded."
-            : "The assignment result could not be confirmed. The latest saved state is now loaded.",
+            ? "The server accepted another client's change first. The latest saved state is now loaded, and this update was not retried."
+            : "The work-order update result could not be confirmed. The latest saved state is now loaded.",
       });
       onRefreshQueue();
     },
     [onRefreshQueue, readDetail],
   );
 
-  async function handleAssign(workOrder: WorkOrder) {
+  async function handleCommand(
+    workOrder: WorkOrderDetail,
+    command: WorkOrderCommand,
+  ) {
+    const permitted =
+      command === "assign"
+        ? identity.role.code === "OPERATIONS_ADMIN" &&
+          workOrder.status === "OPEN" &&
+          selectedTechnicianId !== ""
+        : isAssignedTechnician(workOrder, identity) &&
+          workOrder.status ===
+            (command === "start" ? "ASSIGNED" : "IN_PROGRESS");
     if (
       actionState !== "idle" ||
-      workOrder.status !== "OPEN" ||
-      selectedTechnicianId === ""
+      commandController.current !== null ||
+      !permitted
     ) {
       return;
     }
@@ -311,15 +354,25 @@ function WorkOrderDetailPanel({
       API_TIMEOUT_MS,
     );
     try {
-      const updated = await assignWorkOrder(
-        workOrder.id,
-        selectedTechnicianId,
-        workOrder.version,
-        csrfToken,
-        controller.signal,
-      );
+      const updated = await (command === "assign"
+        ? assignWorkOrder(
+            workOrder.id,
+            selectedTechnicianId,
+            workOrder.version,
+            csrfToken,
+            controller.signal,
+          )
+        : (command === "start" ? startWorkOrder : completeWorkOrder)(
+            workOrder.id,
+            workOrder.version,
+            csrfToken,
+            controller.signal,
+          ));
       if (!mounted.current) {
         return;
+      }
+      if (controller.signal.aborted) {
+        throw new WorkOrderCommandUncertainError();
       }
       setDetailState({
         kind: "ready",
@@ -329,7 +382,12 @@ function WorkOrderDetailPanel({
       setActionState("idle");
       setFeedback({
         kind: "success",
-        message: `Work order assigned to ${updated.assignedTechnician!.displayName}.`,
+        message:
+          command === "assign"
+            ? `Work order assigned to ${updated.assignedTechnician!.displayName}.`
+            : command === "start"
+              ? "Work started. The work order is now in progress."
+              : "Work completed. The work order is now done.",
       });
       onRefreshQueue();
     } catch (error: unknown) {
@@ -366,11 +424,7 @@ function WorkOrderDetailPanel({
         return;
       }
       await recoverLatest(
-        error instanceof WorkOrderStateConflictError
-          ? "conflict"
-          : error instanceof WorkOrderCommandUncertainError
-            ? "uncertain"
-            : "uncertain",
+        error instanceof WorkOrderStateConflictError ? "conflict" : "uncertain",
       );
     } finally {
       window.clearTimeout(timeoutId);
@@ -382,6 +436,17 @@ function WorkOrderDetailPanel({
 
   const readyWorkOrder =
     detailState.kind === "ready" ? detailState.workOrder : null;
+  const ownedAction =
+    readyWorkOrder !== null && isAssignedTechnician(readyWorkOrder, identity)
+      ? readyWorkOrder.status === "ASSIGNED"
+        ? "start"
+        : readyWorkOrder.status === "IN_PROGRESS"
+          ? "complete"
+          : null
+      : null;
+  const canAssign =
+    identity.role.code === "OPERATIONS_ADMIN" &&
+    readyWorkOrder?.status === "OPEN";
 
   return (
     <section
@@ -461,7 +526,7 @@ function WorkOrderDetailPanel({
             </div>
             <div className="work-order-detail__badges">
               <StatusBadge status={readyWorkOrder.status} />
-              {identity.role.code !== "OPERATIONS_ADMIN" && (
+              {!canAssign && ownedAction === null && (
                 <span className="readonly-badge">Read-only</span>
               )}
             </div>
@@ -515,106 +580,180 @@ function WorkOrderDetailPanel({
             </div>
           </dl>
 
+          <section
+            className="work-order-history-section"
+            aria-labelledby="work-order-history-title"
+          >
+            <h3 id="work-order-history-title">Status history</h3>
+            {readyWorkOrder.history.length === 0 ? (
+              <p className="asset-message">
+                No status transitions have been recorded.
+              </p>
+            ) : (
+              <>
+                <p className="asset-message">
+                  Transitions are shown oldest first. Times are UTC.
+                </p>
+                <ol
+                  className="work-order-history-list"
+                  aria-label="Work-order status history"
+                >
+                  {readyWorkOrder.history.map((entry) => (
+                    <li key={entry.sequenceNumber}>
+                      <div>
+                        <strong>
+                          {statusLabels[entry.fromStatus]} →{" "}
+                          {statusLabels[entry.toStatus]}
+                        </strong>
+                        <span>
+                          {entry.actor?.displayName ??
+                            "Unknown actor (assignment predates history tracking)"}
+                        </span>
+                      </div>
+                      <time dateTime={entry.transitionedAt}>
+                        {formatTimestamp(entry.transitionedAt)}
+                      </time>
+                    </li>
+                  ))}
+                </ol>
+              </>
+            )}
+          </section>
+
           {feedback !== null && (
             <p
+              ref={feedbackFocus}
               className={`form-message work-order-action-feedback work-order-action-feedback--${feedback.kind}`}
               role={feedback.kind === "success" ? "status" : "alert"}
+              tabIndex={-1}
             >
               {feedback.message}
             </p>
           )}
 
-          {identity.role.code === "OPERATIONS_ADMIN" &&
-            readyWorkOrder.status === "OPEN" && (
-              <section
-                className="work-order-assignment"
-                aria-labelledby="work-order-assignment-title"
-              >
-                <h3 id="work-order-assignment-title">Assign technician</h3>
-                {technicianState.kind === "loading" && (
-                  <p className="asset-message" role="status">
-                    Loading eligible technicians…
+          {actionState === "recovery-failed" && (
+            <button
+              className="secondary-button secondary-button--compact"
+              type="button"
+              onClick={() => void recoverLatest(recoveryReason.current)}
+            >
+              Retry latest state
+            </button>
+          )}
+
+          {canAssign && (
+            <section
+              className="work-order-assignment"
+              aria-labelledby="work-order-assignment-title"
+            >
+              <h3 id="work-order-assignment-title">Assign technician</h3>
+              {technicianState.kind === "loading" && (
+                <p className="asset-message" role="status">
+                  Loading eligible technicians…
+                </p>
+              )}
+              {technicianState.kind === "forbidden" && (
+                <p className="asset-message" role="alert">
+                  Eligible-technician access was denied.
+                </p>
+              )}
+              {technicianState.kind === "unavailable" && (
+                <div className="work-order-state-panel">
+                  <p className="asset-message form-message--error" role="alert">
+                    Eligible technicians are unavailable.
+                  </p>
+                  <button
+                    className="secondary-button secondary-button--compact"
+                    type="button"
+                    onClick={() => void readTechnicians()}
+                  >
+                    Retry eligible technicians
+                  </button>
+                </div>
+              )}
+              {technicianState.kind === "ready" &&
+                technicianState.result.technicians.length === 0 && (
+                  <p className="asset-message">
+                    No eligible technicians are available.
                   </p>
                 )}
-                {technicianState.kind === "forbidden" && (
-                  <p className="asset-message" role="alert">
-                    Eligible-technician access was denied.
-                  </p>
-                )}
-                {technicianState.kind === "unavailable" && (
-                  <div className="work-order-state-panel">
-                    <p
-                      className="asset-message form-message--error"
-                      role="alert"
-                    >
-                      Eligible technicians are unavailable.
-                    </p>
+              {technicianState.kind === "ready" &&
+                technicianState.result.technicians.length > 0 && (
+                  <div className="work-order-assignment__controls">
+                    <label>
+                      <span>Eligible technician</span>
+                      <select
+                        value={selectedTechnicianId}
+                        disabled={actionState !== "idle"}
+                        onChange={(event) =>
+                          setSelectedTechnicianId(event.target.value)
+                        }
+                      >
+                        {technicianState.result.technicians.map(
+                          (technician) => (
+                            <option key={technician.id} value={technician.id}>
+                              {technician.displayName}
+                            </option>
+                          ),
+                        )}
+                      </select>
+                    </label>
                     <button
-                      className="secondary-button secondary-button--compact"
+                      className="primary-button"
                       type="button"
-                      onClick={() => void readTechnicians()}
+                      disabled={
+                        actionState !== "idle" || selectedTechnicianId === ""
+                      }
+                      onClick={() =>
+                        void handleCommand(readyWorkOrder, "assign")
+                      }
                     >
-                      Retry eligible technicians
+                      {actionState === "submitting"
+                        ? "Assigning work order…"
+                        : actionState === "recovering"
+                          ? "Recovering latest state…"
+                          : actionState === "recovery-failed"
+                            ? "Latest state required"
+                            : "Assign work order"}
                     </button>
                   </div>
                 )}
-                {technicianState.kind === "ready" &&
-                  technicianState.result.technicians.length === 0 && (
-                    <p className="asset-message">
-                      No eligible technicians are available.
-                    </p>
-                  )}
-                {technicianState.kind === "ready" &&
-                  technicianState.result.technicians.length > 0 && (
-                    <div className="work-order-assignment__controls">
-                      <label>
-                        <span>Eligible technician</span>
-                        <select
-                          value={selectedTechnicianId}
-                          disabled={actionState !== "idle"}
-                          onChange={(event) =>
-                            setSelectedTechnicianId(event.target.value)
-                          }
-                        >
-                          {technicianState.result.technicians.map(
-                            (technician) => (
-                              <option key={technician.id} value={technician.id}>
-                                {technician.displayName}
-                              </option>
-                            ),
-                          )}
-                        </select>
-                      </label>
-                      <button
-                        className="primary-button"
-                        type="button"
-                        disabled={
-                          actionState !== "idle" || selectedTechnicianId === ""
-                        }
-                        onClick={() => void handleAssign(readyWorkOrder)}
-                      >
-                        {actionState === "submitting"
-                          ? "Assigning work order…"
-                          : actionState === "recovering"
-                            ? "Recovering latest state…"
-                            : actionState === "recovery-failed"
-                              ? "Latest state required"
-                              : "Assign work order"}
-                      </button>
-                      {actionState === "recovery-failed" && (
-                        <button
-                          className="secondary-button secondary-button--compact"
-                          type="button"
-                          onClick={() =>
-                            void recoverLatest(recoveryReason.current)
-                          }
-                        >
-                          Retry latest state
-                        </button>
-                      )}
-                    </div>
-                  )}
-              </section>
+            </section>
+          )}
+
+          {ownedAction !== null && (
+            <section
+              className="work-order-lifecycle"
+              aria-labelledby="work-order-lifecycle-title"
+            >
+              <h3 id="work-order-lifecycle-title">Update your work</h3>
+              <p className="asset-message">You are the assigned technician.</p>
+              <button
+                className="primary-button"
+                type="button"
+                disabled={actionState !== "idle"}
+                onClick={() => void handleCommand(readyWorkOrder, ownedAction)}
+              >
+                {actionState === "submitting"
+                  ? ownedAction === "start"
+                    ? "Starting work…"
+                    : "Completing work…"
+                  : actionState === "recovering"
+                    ? "Recovering latest state…"
+                    : actionState === "recovery-failed"
+                      ? "Latest state required"
+                      : ownedAction === "start"
+                        ? "Start work"
+                        : "Complete work"}
+              </button>
+            </section>
+          )}
+          {ownedAction === null &&
+            (readyWorkOrder.status === "ASSIGNED" ||
+              readyWorkOrder.status === "IN_PROGRESS") && (
+              <p className="asset-message">
+                Only the assigned technician can update this work order.
+              </p>
             )}
         </div>
       )}

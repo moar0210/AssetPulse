@@ -3,7 +3,12 @@ import type { CsrfToken } from "./session";
 export const DEFAULT_WORK_ORDER_LIMIT = 50;
 export const MAX_WORK_ORDER_LIMIT = 100;
 
-export const workOrderStatuses = ["OPEN", "ASSIGNED"] as const;
+export const workOrderStatuses = [
+  "OPEN",
+  "ASSIGNED",
+  "IN_PROGRESS",
+  "DONE",
+] as const;
 export type WorkOrderStatus = (typeof workOrderStatuses)[number];
 
 export type WorkOrderTechnician = Readonly<{
@@ -26,6 +31,17 @@ export type WorkOrder = Readonly<{
     ruleName: string;
   }>;
 }>;
+
+export type WorkOrderHistory = Readonly<{
+  sequenceNumber: number;
+  fromStatus: WorkOrderStatus;
+  toStatus: WorkOrderStatus;
+  actor: Readonly<{ id: string; displayName: string }> | null;
+  transitionedAt: string;
+}>;
+
+export type WorkOrderDetail = WorkOrder &
+  Readonly<{ history: readonly WorkOrderHistory[] }>;
 
 export type WorkOrderList = Readonly<{
   workOrders: readonly WorkOrder[];
@@ -110,6 +126,16 @@ const CONFIGURATION_KEY_PATTERN = /^[A-Z0-9]+(?:-[A-Z0-9]+)*$/;
 const ISO_INSTANT_PATTERN =
   /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?(Z|[+-]\d{2}:\d{2})$/;
 const NANOSECONDS_PER_MILLISECOND = 1_000_000n;
+const WORK_ORDER_KEYS = [
+  "id",
+  "alertId",
+  "status",
+  "version",
+  "assignedTechnician",
+  "createdAt",
+  "updatedAt",
+  "context",
+] as const;
 
 function isExactRecord(
   value: unknown,
@@ -186,7 +212,7 @@ function parseInstant(value: unknown): bigint | null {
   );
 }
 
-function isTechnician(value: unknown): value is WorkOrderTechnician {
+function isUserReference(value: unknown): value is WorkOrderTechnician {
   return (
     isExactRecord(value, ["id", "displayName"]) &&
     isUuid(value.id) &&
@@ -196,26 +222,17 @@ function isTechnician(value: unknown): value is WorkOrderTechnician {
 
 function parseWorkOrder(value: unknown, expectedId?: string): WorkOrder {
   if (
-    !isExactRecord(value, [
-      "id",
-      "alertId",
-      "status",
-      "version",
-      "assignedTechnician",
-      "createdAt",
-      "updatedAt",
-      "context",
-    ]) ||
+    !isExactRecord(value, WORK_ORDER_KEYS) ||
     !isUuid(value.id) ||
     (expectedId !== undefined &&
       value.id.toLowerCase() !== expectedId.toLowerCase()) ||
     !isUuid(value.alertId) ||
     !workOrderStatuses.some((status) => status === value.status) ||
+    typeof value.version !== "number" ||
     !Number.isSafeInteger(value.version) ||
-    (value.status === "OPEN" &&
-      (value.version !== 0 || value.assignedTechnician !== null)) ||
-    (value.status === "ASSIGNED" &&
-      (value.version !== 1 || !isTechnician(value.assignedTechnician))) ||
+    workOrderStatuses[value.version] !== value.status ||
+    (value.status === "OPEN" && value.assignedTechnician !== null) ||
+    (value.status !== "OPEN" && !isUserReference(value.assignedTechnician)) ||
     !isExactRecord(value.context, [
       "assetId",
       "assetCode",
@@ -236,6 +253,54 @@ function parseWorkOrder(value: unknown, expectedId?: string): WorkOrder {
     throw new Error("The work-orders API returned an unexpected payload");
   }
   return value as WorkOrder;
+}
+
+function parseWorkOrderDetail(
+  value: unknown,
+  expectedId?: string,
+): WorkOrderDetail {
+  if (!isExactRecord(value, [...WORK_ORDER_KEYS, "history"])) {
+    throw new Error("The work-orders API returned an unexpected payload");
+  }
+  const { history, ...summary } = value;
+  const workOrder = parseWorkOrder(summary, expectedId);
+  if (!Array.isArray(history) || history.length !== workOrder.version) {
+    throw new Error("The work-orders API returned an unexpected payload");
+  }
+  let previousAt = parseInstant(workOrder.createdAt)!;
+  const updatedAt = parseInstant(workOrder.updatedAt)!;
+  for (const [index, entry] of history.entries()) {
+    if (
+      !isExactRecord(entry, [
+        "sequenceNumber",
+        "fromStatus",
+        "toStatus",
+        "actor",
+        "transitionedAt",
+      ]) ||
+      entry.sequenceNumber !== index + 1 ||
+      entry.fromStatus !== workOrderStatuses[index] ||
+      entry.toStatus !== workOrderStatuses[index + 1] ||
+      (entry.actor === null
+        ? index !== 0
+        : !isUserReference(entry.actor) ||
+          (index > 0 &&
+            entry.actor.id.toLowerCase() !==
+              workOrder.assignedTechnician?.id.toLowerCase()))
+    ) {
+      throw new Error("The work-orders API returned an unexpected payload");
+    }
+    const transitionedAt = parseInstant(entry.transitionedAt);
+    if (
+      transitionedAt === null ||
+      transitionedAt < previousAt ||
+      transitionedAt > updatedAt
+    ) {
+      throw new Error("The work-orders API returned an unexpected payload");
+    }
+    previousAt = transitionedAt;
+  }
+  return { ...workOrder, history: history as WorkOrderHistory[] };
 }
 
 function parseWorkOrderList(value: unknown, limit: number): WorkOrderList {
@@ -268,7 +333,7 @@ function parseEligibleTechnicians(value: unknown): EligibleTechnicianList {
     !isExactRecord(value, ["technicians"]) ||
     !Array.isArray(value.technicians) ||
     value.technicians.length > 100 ||
-    !value.technicians.every(isTechnician)
+    !value.technicians.every(isUserReference)
   ) {
     throw new Error(
       "The eligible-technicians endpoint returned an unexpected payload",
@@ -344,7 +409,7 @@ function classifyReadFailure(response: Response): void {
 
 async function classifyMutationFailure(
   response: Response,
-  command: "create" | "assign",
+  command: "create" | "assign" | "start" | "complete",
 ): Promise<void> {
   if (response.status === 401) {
     throw new WorkOrderSessionExpiredError();
@@ -371,14 +436,14 @@ async function classifyMutationFailure(
     throw new WorkOrderAlreadyExistsError();
   }
   if (
-    command === "assign" &&
+    command !== "create" &&
     response.status === 404 &&
     code === "WORK_ORDER_NOT_FOUND"
   ) {
     throw new WorkOrderNotFoundError();
   }
   if (
-    command === "assign" &&
+    command !== "create" &&
     response.status === 409 &&
     code === "WORK_ORDER_STATE_CONFLICT"
   ) {
@@ -418,7 +483,7 @@ export async function getWorkOrders(
 export async function getWorkOrderDetail(
   workOrderId: string,
   signal?: AbortSignal,
-): Promise<WorkOrder> {
+): Promise<WorkOrderDetail> {
   requireUuid(workOrderId, "work-order");
   const response = await fetch(`/api/v1/work-orders/${workOrderId}`, {
     method: "GET",
@@ -427,7 +492,7 @@ export async function getWorkOrderDetail(
     signal,
   });
   classifyReadFailure(response);
-  return parseWorkOrder(await readJson(response), workOrderId);
+  return parseWorkOrderDetail(await readJson(response), workOrderId);
 }
 
 export const getWorkOrder = getWorkOrderDetail;
@@ -449,7 +514,7 @@ export async function createWorkOrder(
   alertId: string,
   csrfToken: CsrfToken,
   signal?: AbortSignal,
-): Promise<WorkOrder> {
+): Promise<WorkOrderDetail> {
   requireUuid(alertId, "alert");
   let response: Response;
   try {
@@ -471,7 +536,7 @@ export async function createWorkOrder(
     await classifyMutationFailure(response, "create");
   }
   try {
-    const workOrder = parseWorkOrder(await readJson(response));
+    const workOrder = parseWorkOrderDetail(await readJson(response));
     if (
       workOrder.alertId.toLowerCase() !== alertId.toLowerCase() ||
       workOrder.status !== "OPEN"
@@ -490,7 +555,7 @@ export async function assignWorkOrder(
   expectedVersion: number,
   csrfToken: CsrfToken,
   signal?: AbortSignal,
-): Promise<WorkOrder> {
+): Promise<WorkOrderDetail> {
   requireUuid(workOrderId, "work-order");
   requireUuid(technicianUserId, "technician");
   if (!Number.isSafeInteger(expectedVersion) || expectedVersion < 0) {
@@ -516,10 +581,14 @@ export async function assignWorkOrder(
     await classifyMutationFailure(response, "assign");
   }
   try {
-    const workOrder = parseWorkOrder(await readJson(response), workOrderId);
+    const workOrder = parseWorkOrderDetail(
+      await readJson(response),
+      workOrderId,
+    );
     if (
       workOrder.status !== "ASSIGNED" ||
       workOrder.version !== expectedVersion + 1 ||
+      workOrder.history[0]?.actor === null ||
       workOrder.assignedTechnician?.id.toLowerCase() !==
         technicianUserId.toLowerCase()
     ) {
@@ -529,4 +598,81 @@ export async function assignWorkOrder(
   } catch (error: unknown) {
     throw new WorkOrderCommandUncertainError({ cause: error });
   }
+}
+
+async function transitionWorkOrder(
+  workOrderId: string,
+  expectedVersion: number,
+  command: "start" | "complete",
+  csrfToken: CsrfToken,
+  signal?: AbortSignal,
+): Promise<WorkOrderDetail> {
+  requireUuid(workOrderId, "work-order");
+  if (!Number.isSafeInteger(expectedVersion) || expectedVersion < 0) {
+    throw new Error("A non-negative expected work-order version is required");
+  }
+  let response: Response;
+  try {
+    response = await fetch(`/api/v1/work-orders/${workOrderId}/${command}`, {
+      method: "POST",
+      headers: {
+        Accept: JSON_MEDIA_TYPE,
+        "Content-Type": JSON_MEDIA_TYPE,
+        [csrfToken.headerName]: csrfToken.token,
+      },
+      credentials: "same-origin",
+      body: JSON.stringify({ expectedVersion }),
+      signal,
+    });
+  } catch (error: unknown) {
+    throw new WorkOrderCommandUncertainError({ cause: error });
+  }
+  if (response.status !== 200) {
+    await classifyMutationFailure(response, command);
+  }
+  try {
+    const workOrder = parseWorkOrderDetail(
+      await readJson(response),
+      workOrderId,
+    );
+    if (
+      workOrder.status !== (command === "start" ? "IN_PROGRESS" : "DONE") ||
+      workOrder.version !== expectedVersion + 1
+    ) {
+      throw new Error("unexpected work-order transition");
+    }
+    return workOrder;
+  } catch (error: unknown) {
+    throw new WorkOrderCommandUncertainError({ cause: error });
+  }
+}
+
+export function startWorkOrder(
+  workOrderId: string,
+  expectedVersion: number,
+  csrfToken: CsrfToken,
+  signal?: AbortSignal,
+): Promise<WorkOrderDetail> {
+  return transitionWorkOrder(
+    workOrderId,
+    expectedVersion,
+    "start",
+    csrfToken,
+    signal,
+  );
+}
+
+export function completeWorkOrder(
+  workOrderId: string,
+  expectedVersion: number,
+  csrfToken: CsrfToken,
+  signal?: AbortSignal,
+): Promise<WorkOrderDetail> {
+  return transitionWorkOrder(
+    workOrderId,
+    expectedVersion,
+    "complete",
+    csrfToken,
+    signal,
+  );
 }

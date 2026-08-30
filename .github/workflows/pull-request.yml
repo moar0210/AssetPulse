@@ -2,6 +2,7 @@ name: Pull request verification
 
 on:
   pull_request:
+  workflow_call:
 
 permissions:
   contents: read
@@ -20,10 +21,10 @@ jobs:
         working-directory: backend
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Set up Java 21
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
         with:
           distribution: temurin
           java-version: "21"
@@ -42,10 +43,10 @@ jobs:
         working-directory: frontend
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Set up Node.js 24.14.0
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 24.14.0
           cache: npm
@@ -69,6 +70,10 @@ jobs:
       - name: Build production bundle
         run: npm run build
 
+      - name: Test public deployment smoke verifier
+        working-directory: .
+        run: node --test infra/smoke/public-smoke.test.mjs
+
   simulator:
     name: Simulator
     runs-on: ubuntu-latest
@@ -78,10 +83,10 @@ jobs:
         working-directory: simulator
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Set up Node.js 24.14.0
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 24.14.0
           cache: npm
@@ -99,15 +104,21 @@ jobs:
   containers:
     name: Containers
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     env:
       POSTGRES_ADMIN_PASSWORD: ci-only-admin-password
       SPRING_DATASOURCE_USERNAME: assetpulse
       SPRING_DATASOURCE_PASSWORD: ci-only-app-password
+      ASSETPULSE_SESSION_COOKIE_SECURE: true
       ASSETPULSE_HTTP_PORT: 8080
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Set up Node.js 24.14.0
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24.14.0
 
       - name: Validate Compose configuration
         run: docker compose config --quiet
@@ -115,8 +126,217 @@ jobs:
       - name: Build runtime images
         run: docker compose build
 
+      - name: Build database bootstrap image
+        run: >-
+          docker build
+          --file infra/postgres/Dockerfile.bootstrap
+          --tag assetpulse-database-bootstrap:local
+          infra/postgres
+
+      - name: Validate Azure template
+        shell: bash
+        run: |
+          compiled_template="$RUNNER_TEMP/assetpulse-main.json"
+          az bicep build --file infra/azure/main.bicep --outfile "$compiled_template"
+          timeout_setting_count="$(jq '[
+            .resources[]
+            | select(.type == "Microsoft.App/containerApps")
+            | .properties.template.containers[]
+            | select(.name == "backend")
+            | .env[]
+            | select(
+                .name == "ASSETPULSE_ALERT_STREAM_TIMEOUT_MILLIS"
+                and .value == "210000"
+              )
+          ] | length' "$compiled_template")"
+          test "$timeout_setting_count" = "1"
+
       - name: Verify non-root runtime users
         shell: bash
         run: |
           test "$(docker image inspect assetpulse-backend:local --format '{{.Config.User}}')" = "10001:10001"
           test "$(docker image inspect assetpulse-frontend:local --format '{{.Config.User}}')" = "nginx"
+          test "$(docker image inspect assetpulse-database-bootstrap:local --format '{{.Config.User}}')" = "postgres"
+
+      - name: Verify Azure frontend runtime rendering
+        shell: bash
+        run: |
+          rendered="$(docker run --rm \
+            --read-only \
+            --tmpfs /tmp \
+            --env BACKEND_UPSTREAM=127.0.0.1:8081 \
+            assetpulse-frontend:local \
+            nginx -T -c /tmp/nginx.conf 2>&1)"
+          test "$(grep -c -F "proxy_pass http://127.0.0.1:8081;" <<< "$rendered")" = "2"
+          grep -F "proxy_buffering off;" <<< "$rendered"
+
+      - name: Reject unbounded bootstrap timeout
+        shell: bash
+        run: |
+          if docker run --rm \
+            --env PGUSER=postgres \
+            --env PGDATABASE=assetpulse \
+            --env PGCONNECT_TIMEOUT=00 \
+            --env ASSETPULSE_APP_USERNAME=assetpulse \
+            --env ASSETPULSE_APP_PASSWORD="$SPRING_DATASOURCE_PASSWORD" \
+            assetpulse-database-bootstrap:local; then
+            echo "Bootstrap accepted an unbounded connection timeout" >&2
+            exit 1
+          fi
+
+      - name: Start isolated application stack
+        run: >-
+          docker compose
+          --project-name assetpulse-ci
+          up
+          --detach
+          --wait
+          --wait-timeout 180
+
+      - name: Verify idempotent least-privilege bootstrap
+        shell: bash
+        run: |
+          bootstrap_role() {
+            docker run --rm \
+              --network assetpulse-ci_database \
+              --env PGHOST=postgres \
+              --env PGPORT=5432 \
+              --env PGDATABASE=assetpulse \
+              --env PGUSER=postgres \
+              --env PGPASSWORD="$POSTGRES_ADMIN_PASSWORD" \
+              --env ASSETPULSE_APP_USERNAME="$SPRING_DATASOURCE_USERNAME" \
+              --env ASSETPULSE_APP_PASSWORD="$SPRING_DATASOURCE_PASSWORD" \
+              assetpulse-database-bootstrap:local
+          }
+
+          bootstrap_role
+          bootstrap_role
+
+          safe_attributes="$(docker compose \
+            --project-name assetpulse-ci \
+            exec --no-TTY postgres \
+            psql --username=postgres --dbname=assetpulse --tuples-only --no-align \
+            --command="SELECT app_role.rolcanlogin AND NOT app_role.rolsuper AND NOT app_role.rolcreatedb AND NOT app_role.rolcreaterole AND NOT app_role.rolinherit AND NOT app_role.rolreplication AND NOT app_role.rolbypassrls AND NOT EXISTS (SELECT 1 FROM pg_auth_members AS membership WHERE membership.member = app_role.oid) FROM pg_roles AS app_role WHERE app_role.rolname = '$SPRING_DATASOURCE_USERNAME';")"
+          test "$safe_attributes" = "t"
+
+      - name: Reject administrator role collision
+        shell: bash
+        run: |
+          if docker run --rm \
+            --network assetpulse-ci_database \
+            --env PGHOST=postgres \
+            --env PGPORT=5432 \
+            --env PGDATABASE=assetpulse \
+            --env PGUSER=postgres \
+            --env PGPASSWORD="$POSTGRES_ADMIN_PASSWORD" \
+            --env ASSETPULSE_APP_USERNAME=postgres \
+            --env ASSETPULSE_APP_PASSWORD="$SPRING_DATASOURCE_PASSWORD" \
+            assetpulse-database-bootstrap:local; then
+            echo "Bootstrap accepted the administrator as its application role" >&2
+            exit 1
+          fi
+
+          admin_is_superuser="$(docker compose \
+            --project-name assetpulse-ci \
+            exec --no-TTY postgres \
+            psql --username=postgres --dbname=assetpulse --tuples-only --no-align \
+            --command="SELECT rolsuper FROM pg_roles WHERE rolname = 'postgres';")"
+          test "$admin_is_superuser" = "t"
+
+          admin_password_is_valid="$(docker compose \
+            --project-name assetpulse-ci \
+            exec --no-TTY \
+            --env PGPASSWORD="$POSTGRES_ADMIN_PASSWORD" \
+            postgres \
+            psql --host=127.0.0.1 --username=postgres --dbname=assetpulse --tuples-only --no-align \
+            --command="SELECT 1;")"
+          test "$admin_password_is_valid" = "1"
+
+      - name: Reject privileged existing application role
+        shell: bash
+        run: |
+          docker compose \
+            --project-name assetpulse-ci \
+            exec --no-TTY postgres \
+            psql --username=postgres --dbname=assetpulse --set=ON_ERROR_STOP=1 \
+            --command="CREATE ROLE dangerous_app WITH LOGIN BYPASSRLS PASSWORD 'ci-dangerous-original'; CREATE ROLE limited_admin WITH LOGIN CREATEROLE PASSWORD 'ci-limited-admin'; GRANT dangerous_app TO limited_admin WITH ADMIN OPTION;"
+
+          if docker run --rm \
+            --network assetpulse-ci_database \
+            --env PGHOST=postgres \
+            --env PGPORT=5432 \
+            --env PGDATABASE=assetpulse \
+            --env PGUSER=limited_admin \
+            --env PGPASSWORD=ci-limited-admin \
+            --env ASSETPULSE_APP_USERNAME=dangerous_app \
+            --env ASSETPULSE_APP_PASSWORD=ci-dangerous-replacement \
+            assetpulse-database-bootstrap:local; then
+            echo "Bootstrap accepted a privileged existing application role" >&2
+            exit 1
+          fi
+
+          dangerous_role_is_unchanged="$(docker compose \
+            --project-name assetpulse-ci \
+            exec --no-TTY postgres \
+            psql --username=postgres --dbname=assetpulse --tuples-only --no-align \
+            --command="SELECT rolbypassrls FROM pg_roles WHERE rolname = 'dangerous_app';")"
+          test "$dangerous_role_is_unchanged" = "t"
+
+          dangerous_password_is_unchanged="$(docker compose \
+            --project-name assetpulse-ci \
+            exec --no-TTY \
+            --env PGPASSWORD=ci-dangerous-original \
+            postgres \
+            psql --host=127.0.0.1 --username=dangerous_app --dbname=assetpulse --tuples-only --no-align \
+            --command="SELECT 1;")"
+          test "$dangerous_password_is_unchanged" = "1"
+
+      - name: Reject existing application role membership
+        shell: bash
+        run: |
+          docker compose \
+            --project-name assetpulse-ci \
+            exec --no-TTY postgres \
+            psql --username=postgres --dbname=assetpulse --set=ON_ERROR_STOP=1 \
+            --command="CREATE ROLE privileged_group WITH NOLOGIN CREATEDB; CREATE ROLE member_app WITH LOGIN NOINHERIT PASSWORD 'ci-member-original'; GRANT privileged_group TO member_app WITH INHERIT TRUE, SET TRUE;"
+
+          if docker run --rm \
+            --network assetpulse-ci_database \
+            --env PGHOST=postgres \
+            --env PGPORT=5432 \
+            --env PGDATABASE=assetpulse \
+            --env PGUSER=postgres \
+            --env PGPASSWORD="$POSTGRES_ADMIN_PASSWORD" \
+            --env ASSETPULSE_APP_USERNAME=member_app \
+            --env ASSETPULSE_APP_PASSWORD=ci-member-replacement \
+            assetpulse-database-bootstrap:local; then
+            echo "Bootstrap accepted an application role with role membership" >&2
+            exit 1
+          fi
+
+          membership_is_unchanged="$(docker compose \
+            --project-name assetpulse-ci \
+            exec --no-TTY postgres \
+            psql --username=postgres --dbname=assetpulse --tuples-only --no-align \
+            --command="SELECT count(*) FROM pg_auth_members AS membership JOIN pg_roles AS member_role ON member_role.oid = membership.member JOIN pg_roles AS granted_role ON granted_role.oid = membership.roleid WHERE member_role.rolname = 'member_app' AND granted_role.rolname = 'privileged_group';")"
+          test "$membership_is_unchanged" = "1"
+
+          member_password_is_unchanged="$(docker compose \
+            --project-name assetpulse-ci \
+            exec --no-TTY \
+            --env PGPASSWORD=ci-member-original \
+            postgres \
+            psql --host=127.0.0.1 --username=member_app --dbname=assetpulse --tuples-only --no-align \
+            --command="SELECT 1;")"
+          test "$member_password_is_unchanged" = "1"
+
+      - name: Verify local same-origin behavior
+        run: node infra/smoke/public-smoke.mjs --base-url http://127.0.0.1:8080 --allow-http
+
+      - name: Show application logs after failure
+        if: failure()
+        run: docker compose --project-name assetpulse-ci logs --no-color
+
+      - name: Remove isolated application stack
+        if: always()
+        run: docker compose --project-name assetpulse-ci down --volumes --remove-orphans

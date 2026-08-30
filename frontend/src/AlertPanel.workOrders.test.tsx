@@ -132,7 +132,7 @@ describe("alert-to-work-order action", () => {
   it("creates a work order with the in-memory CSRF token", async () => {
     const fetchMock = installFetch(async (url) => {
       if (url === "/api/v1/work-orders") {
-        return jsonResponse(workOrder, 201);
+        return jsonResponse({ ...workOrder, history: [] }, 201);
       }
       throw new Error(`Unexpected URL ${url}`);
     });

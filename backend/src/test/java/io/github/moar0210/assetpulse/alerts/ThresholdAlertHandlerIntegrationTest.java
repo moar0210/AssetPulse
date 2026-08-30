@@ -98,6 +98,7 @@ class ThresholdAlertHandlerIntegrationTest {
     @BeforeEach
     void resetTelemetryAndAlerts() {
         streamService.closeAll();
+        jdbcClient.sql("TRUNCATE TABLE audit_event").update();
         jdbcClient.sql("TRUNCATE TABLE alert_status_history").update();
         jdbcClient.sql("DELETE FROM alert").update();
         jdbcClient.sql("DELETE FROM telemetry_processing_event").update();
@@ -653,7 +654,10 @@ class ThresholdAlertHandlerIntegrationTest {
                     executor.submit(
                             () ->
                                     commandService.resolve(
-                                            NORTHSTAR_ID, NORTHSTAR_ADMIN_ID, acknowledged.id()));
+                                            NORTHSTAR_ID,
+                                            NORTHSTAR_ADMIN_ID,
+                                            acknowledged.id(),
+                                            UUID.randomUUID().toString()));
 
             assertThat(waitForBlockedAlertTransition()).isTrue();
             allowOccurrenceCommit.countDown();
@@ -712,7 +716,8 @@ class ThresholdAlertHandlerIntegrationTest {
                                                         commandService.resolve(
                                                                 NORTHSTAR_ID,
                                                                 NORTHSTAR_ADMIN_ID,
-                                                                acknowledged.id());
+                                                                acknowledged.id(),
+                                                                UUID.randomUUID().toString());
                                                 resolutionApplied.countDown();
                                                 await(allowResolutionCommit);
                                                 return response;
@@ -937,7 +942,11 @@ class ThresholdAlertHandlerIntegrationTest {
         process(initial, owner, FIRST_CLAIM_AT);
         AlertRow opened = readOnlyAlert();
         AlertDetailResponse acknowledged =
-                commandService.acknowledge(NORTHSTAR_ID, NORTHSTAR_ADMIN_ID, opened.id());
+                commandService.acknowledge(
+                        NORTHSTAR_ID,
+                        NORTHSTAR_ADMIN_ID,
+                        opened.id(),
+                        UUID.randomUUID().toString());
         assertThat(acknowledged.status()).isEqualTo(AlertStatus.ACKNOWLEDGED);
         return readOnlyAlert();
     }

@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import io.github.moar0210.assetpulse.AssetPulseApplication;
+import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
@@ -41,6 +42,7 @@ class DatabaseMigrationTest {
             assertProcessingEventLifecycleSchema(jdbcClient);
             assertAlertSchema(jdbcClient);
             assertWorkOrderSchema(jdbcClient);
+            assertWorkOrderHistorySchema(jdbcClient);
             assertDatabaseConstraints(jdbcClient);
             assertAlertHistoryConstraints(jdbcClient);
             assertWorkOrderConstraints(jdbcClient);
@@ -56,7 +58,7 @@ class DatabaseMigrationTest {
         }
 
         assertThat(firstState)
-                .isEqualTo(new DatabaseState("12", 12, 2, 3, 4, 3, 3, 3, 0, 0, 0, 0, 0, 0));
+                .isEqualTo(new DatabaseState("14", 14, 2, 3, 4, 3, 3, 3, 0, 0, 0, 0, 0, 0, 0, 0));
         assertThat(firstSeedRows).hasSize(18);
     }
 
@@ -97,7 +99,9 @@ class DatabaseMigrationTest {
                 count(jdbcClient, "SELECT COUNT(*)::integer FROM telemetry_processing_event"),
                 count(jdbcClient, "SELECT COUNT(*)::integer FROM alert"),
                 count(jdbcClient, "SELECT COUNT(*)::integer FROM alert_status_history"),
-                count(jdbcClient, "SELECT COUNT(*)::integer FROM work_order"));
+                count(jdbcClient, "SELECT COUNT(*)::integer FROM work_order"),
+                count(jdbcClient, "SELECT COUNT(*)::integer FROM work_order_status_history"),
+                count(jdbcClient, "SELECT COUNT(*)::integer FROM audit_event"));
     }
 
     private List<String> readSeedRows(JdbcClient jdbcClient) {
@@ -632,10 +636,12 @@ class DatabaseMigrationTest {
                                         FROM pg_trigger
                                         WHERE tgrelid = 'work_order'::regclass
                                           AND NOT tgisinternal
+                                        ORDER BY tgname
                                         """)
                                 .query(String.class)
                                 .list())
-                .containsExactly("tr_work_order_scope_immutable");
+                .containsExactly(
+                        "tr_work_order_assignment_immutable", "tr_work_order_scope_immutable");
 
         assertThat(
                         jdbcClient
@@ -649,6 +655,57 @@ class DatabaseMigrationTest {
                                 .query(Integer.class)
                                 .single())
                 .isOne();
+    }
+
+    private void assertWorkOrderHistorySchema(JdbcClient jdbcClient) {
+        assertThat(
+                        jdbcClient
+                                .sql(
+                                        """
+                SELECT CONCAT_WS('|', column_name, data_type, is_nullable)
+                FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = 'work_order_status_history'
+                ORDER BY column_name
+                """)
+                                .query(String.class)
+                                .list())
+                .containsExactly(
+                        "actor_user_id|uuid|YES",
+                        "from_status|character varying|NO",
+                        "organisation_id|uuid|NO",
+                        "sequence_number|smallint|NO",
+                        "to_status|character varying|NO",
+                        "transitioned_at|timestamp with time zone|NO",
+                        "work_order_id|uuid|NO");
+        assertThat(
+                        jdbcClient
+                                .sql(
+                                        """
+                SELECT conname FROM pg_constraint
+                WHERE conrelid = 'work_order_status_history'::regclass
+                ORDER BY conname
+                """)
+                                .query(String.class)
+                                .list())
+                .containsExactly(
+                        "ck_work_order_status_history_legacy_actor",
+                        "ck_work_order_status_history_transition",
+                        "fk_work_order_status_history_actor",
+                        "fk_work_order_status_history_work_order",
+                        "pk_work_order_status_history");
+        assertThat(
+                        jdbcClient
+                                .sql(
+                                        """
+                SELECT tgname FROM pg_trigger
+                WHERE tgrelid = 'work_order_status_history'::regclass AND NOT tgisinternal
+                ORDER BY tgname
+                """)
+                                .query(String.class)
+                                .list())
+                .containsExactly(
+                        "tr_work_order_status_history_immutable",
+                        "tr_work_order_status_history_insert");
     }
 
     private void assertWorkOrderConstraints(JdbcClient jdbcClient) {
@@ -846,6 +903,8 @@ class DatabaseMigrationTest {
                                 .update())
                 .isOne();
 
+        assertWorkOrderHistoryConstraints(jdbcClient);
+        jdbcClient.sql("TRUNCATE TABLE work_order_status_history").update();
         jdbcClient.sql("DELETE FROM work_order").update();
         jdbcClient
                 .sql(
@@ -857,6 +916,295 @@ class DatabaseMigrationTest {
                             '80000000-0000-0000-0000-000000000013'
                         )
                         """)
+                .update();
+    }
+
+    private void assertWorkOrderHistoryConstraints(JdbcClient jdbcClient) {
+        UUID workOrderId = UUID.fromString("90000000-0000-0000-0000-000000000001");
+        UUID adminId = UUID.fromString("10000000-0000-0000-0000-000000000001");
+        UUID technicianId = UUID.fromString("10000000-0000-0000-0000-000000000002");
+        UUID foreignAdminId = UUID.fromString("10000000-0000-0000-0000-000000000004");
+        UUID foreignOrganisationId = UUID.fromString("00000000-0000-0000-0000-000000000002");
+
+        for (String invalid :
+                List.of(
+                        "status = 'IN_PROGRESS', version = 1",
+                        "status = 'IN_PROGRESS', version = 3",
+                        "status = 'DONE', version = 2",
+                        "status = 'BLOCKED', version = 2",
+                        "version = -1",
+                        "assigned_technician_user_id = '10000000-0000-0000-0000-000000000001'",
+                        "assigned_technician_role_code = NULL",
+                        "assigned_at = '2026-08-22 10:04:00+00'",
+                        "status = 'OPEN', version = 0, assigned_technician_user_id = NULL, assigned_technician_role_code = NULL, assigned_at = NULL")) {
+            assertThatThrownBy(
+                            () ->
+                                    jdbcClient
+                                            .sql(
+                                                    "UPDATE work_order SET "
+                                                            + invalid
+                                                            + " WHERE id = :workOrderId")
+                                            .param("workOrderId", workOrderId)
+                                            .update())
+                    .isInstanceOf(DataIntegrityViolationException.class);
+        }
+
+        assertThatThrownBy(
+                        () ->
+                                insertWorkOrderHistory(
+                                        jdbcClient,
+                                        NORTHSTAR_ID,
+                                        workOrderId,
+                                        1,
+                                        "OPEN",
+                                        "ASSIGNED",
+                                        foreignAdminId,
+                                        "2026-08-22T10:05:00Z"))
+                .isInstanceOf(DataIntegrityViolationException.class);
+        assertThatThrownBy(
+                        () ->
+                                insertWorkOrderHistory(
+                                        jdbcClient,
+                                        foreignOrganisationId,
+                                        workOrderId,
+                                        1,
+                                        "OPEN",
+                                        "ASSIGNED",
+                                        foreignAdminId,
+                                        "2026-08-22T10:05:00Z"))
+                .isInstanceOf(DataIntegrityViolationException.class);
+        assertThatThrownBy(
+                        () ->
+                                insertWorkOrderHistory(
+                                        jdbcClient,
+                                        NORTHSTAR_ID,
+                                        UUID.randomUUID(),
+                                        1,
+                                        "OPEN",
+                                        "ASSIGNED",
+                                        adminId,
+                                        "2026-08-22T10:05:00Z"))
+                .isInstanceOf(DataIntegrityViolationException.class);
+        assertThatThrownBy(
+                        () ->
+                                insertWorkOrderHistory(
+                                        jdbcClient,
+                                        NORTHSTAR_ID,
+                                        workOrderId,
+                                        1,
+                                        "OPEN",
+                                        "ASSIGNED",
+                                        null,
+                                        "2026-08-22T10:05:00Z"))
+                .isInstanceOf(DataIntegrityViolationException.class);
+        assertThatThrownBy(
+                        () ->
+                                insertWorkOrderHistory(
+                                        jdbcClient,
+                                        NORTHSTAR_ID,
+                                        workOrderId,
+                                        1,
+                                        "DONE",
+                                        "ASSIGNED",
+                                        adminId,
+                                        "2026-08-22T10:05:00Z"))
+                .isInstanceOf(DataIntegrityViolationException.class);
+        assertThatThrownBy(
+                        () ->
+                                insertWorkOrderHistory(
+                                        jdbcClient,
+                                        NORTHSTAR_ID,
+                                        workOrderId,
+                                        1,
+                                        "OPEN",
+                                        "ASSIGNED",
+                                        adminId,
+                                        "2026-08-22T10:06:00Z"))
+                .isInstanceOf(DataIntegrityViolationException.class);
+
+        jdbcClient
+                .sql(
+                        """
+                UPDATE work_order SET status = 'IN_PROGRESS', version = 2, updated_at = '2026-08-22 10:10:00+00'
+                WHERE id = :workOrderId
+                """)
+                .param("workOrderId", workOrderId)
+                .update();
+        assertThatThrownBy(
+                        () ->
+                                insertWorkOrderHistory(
+                                        jdbcClient,
+                                        NORTHSTAR_ID,
+                                        workOrderId,
+                                        2,
+                                        "ASSIGNED",
+                                        "IN_PROGRESS",
+                                        technicianId,
+                                        "2026-08-22T10:10:00Z"))
+                .isInstanceOf(DataIntegrityViolationException.class);
+        jdbcClient
+                .sql(
+                        """
+                UPDATE work_order SET status = 'ASSIGNED', version = 1, updated_at = '2026-08-22 10:05:00+00'
+                WHERE id = :workOrderId
+                """)
+                .param("workOrderId", workOrderId)
+                .update();
+        assertThat(
+                        insertWorkOrderHistory(
+                                jdbcClient,
+                                NORTHSTAR_ID,
+                                workOrderId,
+                                1,
+                                "OPEN",
+                                "ASSIGNED",
+                                adminId,
+                                "2026-08-22T10:05:00Z"))
+                .isOne();
+        assertThatThrownBy(
+                        () ->
+                                insertWorkOrderHistory(
+                                        jdbcClient,
+                                        NORTHSTAR_ID,
+                                        workOrderId,
+                                        1,
+                                        "OPEN",
+                                        "ASSIGNED",
+                                        adminId,
+                                        "2026-08-22T10:05:00Z"))
+                .isInstanceOf(DataIntegrityViolationException.class);
+
+        jdbcClient
+                .sql(
+                        """
+                UPDATE work_order SET status = 'IN_PROGRESS', version = 2, updated_at = '2026-08-22 10:10:00+00'
+                WHERE id = :workOrderId
+                """)
+                .param("workOrderId", workOrderId)
+                .update();
+        assertThatThrownBy(
+                        () ->
+                                insertWorkOrderHistory(
+                                        jdbcClient,
+                                        NORTHSTAR_ID,
+                                        workOrderId,
+                                        2,
+                                        "ASSIGNED",
+                                        "IN_PROGRESS",
+                                        null,
+                                        "2026-08-22T10:10:00Z"))
+                .isInstanceOf(DataIntegrityViolationException.class);
+        assertThat(
+                        insertWorkOrderHistory(
+                                jdbcClient,
+                                NORTHSTAR_ID,
+                                workOrderId,
+                                2,
+                                "ASSIGNED",
+                                "IN_PROGRESS",
+                                technicianId,
+                                "2026-08-22T10:10:00Z"))
+                .isOne();
+
+        jdbcClient
+                .sql(
+                        """
+                UPDATE work_order SET status = 'DONE', version = 3, updated_at = '2026-08-22 10:06:00+00'
+                WHERE id = :workOrderId
+                """)
+                .param("workOrderId", workOrderId)
+                .update();
+        assertThatThrownBy(
+                        () ->
+                                insertWorkOrderHistory(
+                                        jdbcClient,
+                                        NORTHSTAR_ID,
+                                        workOrderId,
+                                        3,
+                                        "IN_PROGRESS",
+                                        "DONE",
+                                        technicianId,
+                                        "2026-08-22T10:06:00Z"))
+                .isInstanceOf(DataIntegrityViolationException.class);
+        jdbcClient
+                .sql(
+                        """
+                UPDATE work_order SET updated_at = '2026-08-22 10:15:00+00'
+                WHERE id = :workOrderId
+                """)
+                .param("workOrderId", workOrderId)
+                .update();
+        assertThat(
+                        insertWorkOrderHistory(
+                                jdbcClient,
+                                NORTHSTAR_ID,
+                                workOrderId,
+                                3,
+                                "IN_PROGRESS",
+                                "DONE",
+                                technicianId,
+                                "2026-08-22T10:15:00Z"))
+                .isOne();
+        assertThatThrownBy(
+                        () ->
+                                insertWorkOrderHistory(
+                                        jdbcClient,
+                                        NORTHSTAR_ID,
+                                        workOrderId,
+                                        4,
+                                        "DONE",
+                                        "OPEN",
+                                        technicianId,
+                                        "2026-08-22T10:15:00Z"))
+                .isInstanceOf(DataIntegrityViolationException.class);
+        List<String> history =
+                jdbcClient
+                        .sql(
+                                "SELECT row_to_json(work_order_status_history)::text FROM work_order_status_history ORDER BY sequence_number")
+                        .query(String.class)
+                        .list();
+        assertThat(history).hasSize(3);
+        for (String mutation :
+                List.of(
+                        "UPDATE work_order_status_history SET actor_user_id = '10000000-0000-0000-0000-000000000002'",
+                        "UPDATE work_order_status_history SET transitioned_at = transitioned_at + INTERVAL '1 minute'",
+                        "UPDATE work_order_status_history SET organisation_id = '00000000-0000-0000-0000-000000000002'",
+                        "DELETE FROM work_order_status_history")) {
+            assertThatThrownBy(() -> jdbcClient.sql(mutation).update())
+                    .isInstanceOf(DataIntegrityViolationException.class);
+        }
+        assertThat(
+                        jdbcClient
+                                .sql(
+                                        "SELECT row_to_json(work_order_status_history)::text FROM work_order_status_history ORDER BY sequence_number")
+                                .query(String.class)
+                                .list())
+                .isEqualTo(history);
+    }
+
+    private int insertWorkOrderHistory(
+            JdbcClient jdbcClient,
+            UUID organisationId,
+            UUID workOrderId,
+            int sequenceNumber,
+            String fromStatus,
+            String toStatus,
+            UUID actorId,
+            String transitionedAt) {
+        return jdbcClient
+                .sql(
+                        """
+                INSERT INTO work_order_status_history (
+                    organisation_id, work_order_id, sequence_number, from_status, to_status, actor_user_id, transitioned_at
+                ) VALUES (:organisationId, :workOrderId, :sequenceNumber, :fromStatus, :toStatus, :actorId, :transitionedAt)
+                """)
+                .param("organisationId", organisationId)
+                .param("workOrderId", workOrderId)
+                .param("sequenceNumber", sequenceNumber)
+                .param("fromStatus", fromStatus)
+                .param("toStatus", toStatus)
+                .param("actorId", actorId)
+                .param("transitionedAt", OffsetDateTime.parse(transitionedAt))
                 .update();
     }
 
@@ -1332,5 +1680,7 @@ class DatabaseMigrationTest {
             int telemetryProcessingEvents,
             int alerts,
             int alertHistoryEntries,
-            int workOrders) {}
+            int workOrders,
+            int workOrderHistoryEntries,
+            int auditEvents) {}
 }

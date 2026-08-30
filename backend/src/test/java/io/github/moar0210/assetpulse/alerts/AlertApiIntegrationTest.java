@@ -28,6 +28,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
@@ -112,6 +113,7 @@ class AlertApiIntegrationTest {
     @BeforeEach
     void clearAlertsAndImmutableHistory() {
         streamService.closeAll();
+        jdbcClient.sql("TRUNCATE TABLE audit_event").update();
         jdbcClient.sql("TRUNCATE TABLE alert_status_history").update();
         jdbcClient.sql("DELETE FROM alert").update();
     }
@@ -488,6 +490,7 @@ class AlertApiIntegrationTest {
                 .andExpect(jsonPath("$.code").value("CSRF_REJECTED"));
 
         assertAlertStateAndHistory(NORTHSTAR_ALERT_ID, AlertStatus.OPEN, 0);
+        assertThat(alertAuditRows()).isEmpty();
     }
 
     @Test
@@ -525,16 +528,22 @@ class AlertApiIntegrationTest {
             assertEquivalentProblems(problems.get(0), problem);
         }
         assertAlertStateAndHistory(RIVERSIDE_ALERT_ID, AlertStatus.OPEN, 0);
+        assertThat(alertAuditRows()).isEmpty();
     }
 
     @Test
+    @DisplayName("AUD-01: alert commands audit the trusted actor and server correlation ID")
     void operationsAdminAcknowledgesThenResolvesWithOneActorHistoryForEachCommand()
             throws Exception {
         insertNorthstarAlert(AlertStatus.OPEN);
         AuthenticatedSession admin = login("admin@northstar.example");
 
         MvcResult acknowledgedResult =
-                mockMvc.perform(command(admin, NORTHSTAR_ALERT_ID, "acknowledge"))
+                mockMvc.perform(
+                                command(admin, NORTHSTAR_ALERT_ID, "acknowledge")
+                                        .header("X-User-ID", RIVERSIDE_ADMIN_ID.toString())
+                                        .header("X-Organisation-ID", RIVERSIDE_ID.toString())
+                                        .header("X-Correlation-ID", "browser-controlled"))
                         .andExpect(status().isOk())
                         .andExpect(header().string("Cache-Control", "no-store"))
                         .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
@@ -557,9 +566,15 @@ class AlertApiIntegrationTest {
                                         .get(0)
                                         .path("transitionedAt")
                                         .asText()));
+        assertAlertAudit(acknowledgedResult, "ALERT_ACKNOWLEDGED");
+        assertThat(alertAuditRows()).hasSize(1);
 
         MvcResult resolvedResult =
-                mockMvc.perform(command(admin, NORTHSTAR_ALERT_ID, "resolve"))
+                mockMvc.perform(
+                                command(admin, NORTHSTAR_ALERT_ID, "resolve")
+                                        .header("X-User-ID", RIVERSIDE_ADMIN_ID.toString())
+                                        .header("X-Organisation-ID", RIVERSIDE_ID.toString())
+                                        .header("X-Correlation-ID", "browser-controlled"))
                         .andExpect(status().isOk())
                         .andExpect(header().string("Cache-Control", "no-store"))
                         .andExpect(jsonPath("$.status").value("RESOLVED"))
@@ -580,6 +595,8 @@ class AlertApiIntegrationTest {
                 AlertStatus.RESOLVED,
                 null);
         assertAlertStateAndHistory(NORTHSTAR_ALERT_ID, AlertStatus.RESOLVED, 2);
+        assertAlertAudit(resolvedResult, "ALERT_RESOLVED");
+        assertThat(alertAuditRows()).hasSize(2);
     }
 
     @Test
@@ -590,10 +607,63 @@ class AlertApiIntegrationTest {
         assertThatThrownBy(
                         () ->
                                 commandService.acknowledge(
-                                        NORTHSTAR_ID, RIVERSIDE_ADMIN_ID, NORTHSTAR_ALERT_ID))
+                                        NORTHSTAR_ID,
+                                        RIVERSIDE_ADMIN_ID,
+                                        NORTHSTAR_ALERT_ID,
+                                        UUID.randomUUID().toString()))
                 .isInstanceOf(DataIntegrityViolationException.class);
 
         assertUnchanged(NORTHSTAR_ALERT_ID, AlertStatus.OPEN, 0, originalUpdatedAt);
+        assertThat(alertAuditRows()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("AUD-01: an audit insert failure rolls back alert state and immutable history")
+    void auditInsertFailuresRollBackAlertStateAndHistory() {
+        insertNorthstarAlert(AlertStatus.OPEN);
+
+        for (String action : List.of("acknowledge", "resolve")) {
+            AlertStatus beforeStatus = AlertStatus.valueOf(readAlertStatus(NORTHSTAR_ALERT_ID));
+            Instant beforeUpdatedAt = readAlertUpdatedAt(NORTHSTAR_ALERT_ID);
+            int beforeHistory = readHistoryCount(NORTHSTAR_ALERT_ID);
+            List<String> beforeAudit = alertAuditRows();
+            jdbcClient
+                    .sql(
+                            "ALTER TABLE audit_event ADD CONSTRAINT ck_alert_test_audit CHECK (subject_alert_id IS NULL) NOT VALID")
+                    .update();
+            try {
+                assertThatThrownBy(
+                                () -> {
+                                    if ("acknowledge".equals(action)) {
+                                        commandService.acknowledge(
+                                                NORTHSTAR_ID,
+                                                NORTHSTAR_ADMIN_ID,
+                                                NORTHSTAR_ALERT_ID,
+                                                UUID.randomUUID().toString());
+                                    } else {
+                                        commandService.resolve(
+                                                NORTHSTAR_ID,
+                                                NORTHSTAR_ADMIN_ID,
+                                                NORTHSTAR_ALERT_ID,
+                                                UUID.randomUUID().toString());
+                                    }
+                                })
+                        .isInstanceOf(DataIntegrityViolationException.class);
+                assertUnchanged(NORTHSTAR_ALERT_ID, beforeStatus, beforeHistory, beforeUpdatedAt);
+                assertThat(alertAuditRows()).isEqualTo(beforeAudit);
+            } finally {
+                jdbcClient
+                        .sql("ALTER TABLE audit_event DROP CONSTRAINT ck_alert_test_audit")
+                        .update();
+            }
+            if ("acknowledge".equals(action)) {
+                commandService.acknowledge(
+                        NORTHSTAR_ID,
+                        NORTHSTAR_ADMIN_ID,
+                        NORTHSTAR_ALERT_ID,
+                        UUID.randomUUID().toString());
+            }
+        }
     }
 
     @Test
@@ -643,6 +713,7 @@ class AlertApiIntegrationTest {
 
         assertEquivalentProblems(problems.get(0), problems.get(1));
         assertAlertStateAndHistory(RIVERSIDE_ALERT_ID, AlertStatus.OPEN, 0);
+        assertThat(alertAuditRows()).isEmpty();
     }
 
     @Test
@@ -678,12 +749,19 @@ class AlertApiIntegrationTest {
             assertThat(success.path("status").asText()).isEqualTo("ACKNOWLEDGED");
             assertThat(success.path("history").size()).isOne();
             assertThat(conflict.path("code").asText()).isEqualTo("ALERT_STATE_CONFLICT");
+            assertAlertAudit(
+                    results.stream()
+                            .filter(result -> result.getResponse().getStatus() == 200)
+                            .findFirst()
+                            .orElseThrow(),
+                    "ALERT_ACKNOWLEDGED");
         } finally {
             start.countDown();
             executor.shutdownNow();
         }
 
         assertAlertStateAndHistory(NORTHSTAR_ALERT_ID, AlertStatus.ACKNOWLEDGED, 1);
+        assertThat(alertAuditRows()).hasSize(1);
     }
 
     private JsonNode listAlerts(MockHttpSession session, String limit) throws Exception {
@@ -758,6 +836,7 @@ class AlertApiIntegrationTest {
     }
 
     private void assertConflict(MockHttpServletRequestBuilder command) throws Exception {
+        List<String> beforeAudit = alertAuditRows();
         mockMvc.perform(command)
                 .andExpect(status().isConflict())
                 .andExpect(header().string("Cache-Control", "no-store"))
@@ -766,6 +845,42 @@ class AlertApiIntegrationTest {
                 .andExpect(
                         jsonPath("$.detail")
                                 .value("The alert cannot transition from its current state."));
+        assertThat(alertAuditRows()).isEqualTo(beforeAudit);
+    }
+
+    private void assertAlertAudit(MvcResult result, String action) {
+        UUID correlationId = UUID.fromString(result.getResponse().getHeader("X-Correlation-ID"));
+        assertThat(
+                        jdbcClient
+                                .sql(
+                                        """
+                                        SELECT CONCAT_WS('|', organisation_id, actor_user_id,
+                                            action, subject_alert_id, correlation_id)
+                                        FROM audit_event
+                                        WHERE subject_alert_id = :alertId AND action = :action
+                                        """)
+                                .param("alertId", NORTHSTAR_ALERT_ID)
+                                .param("action", action)
+                                .query(String.class)
+                                .single())
+                .isEqualTo(
+                        NORTHSTAR_ID
+                                + "|"
+                                + NORTHSTAR_ADMIN_ID
+                                + "|"
+                                + action
+                                + "|"
+                                + NORTHSTAR_ALERT_ID
+                                + "|"
+                                + correlationId);
+    }
+
+    private List<String> alertAuditRows() {
+        return jdbcClient
+                .sql(
+                        "SELECT row_to_json(audit_event)::text FROM audit_event WHERE subject_alert_id IS NOT NULL ORDER BY id")
+                .query(String.class)
+                .list();
     }
 
     private void assertContext(JsonNode context) {

@@ -38,7 +38,8 @@ input {
 button:focus-visible,
 input:focus-visible,
 select:focus-visible,
-.telemetry-table-scroll:focus-visible {
+.telemetry-table-scroll:focus-visible,
+.audit-table-scroll:focus-visible {
   outline: 3px solid #d3a74a;
   outline-offset: 3px;
 }
@@ -1120,7 +1121,9 @@ code {
 }
 
 .work-order-state-panel h3,
-.work-order-assignment h3 {
+.work-order-assignment h3,
+.work-order-lifecycle h3,
+.work-order-history-section h3 {
   color: #eaf2ef;
   font-size: 1rem;
 }
@@ -1213,14 +1216,29 @@ code {
   background: rgb(117 216 182 / 8%);
 }
 
+.work-order-status--in_progress {
+  border-color: rgb(131 189 240 / 36%);
+  color: #add8ff;
+  background: rgb(131 189 240 / 8%);
+}
+
+.work-order-status--done {
+  border-color: rgb(157 221 199 / 22%);
+  color: #b6cfc5;
+  background: rgb(157 221 199 / 7%);
+}
+
 .work-order-state-panel,
 .work-order-detail__content,
-.work-order-assignment {
+.work-order-assignment,
+.work-order-lifecycle,
+.work-order-history-section {
   display: grid;
   gap: 1rem;
 }
 
-.work-order-detail:focus {
+.work-order-detail:focus,
+.work-order-action-feedback:focus {
   outline: 3px solid #d3a74a;
   outline-offset: 3px;
 }
@@ -1261,12 +1279,16 @@ code {
   overflow-wrap: anywhere;
 }
 
-.work-order-assignment {
+.work-order-assignment,
+.work-order-lifecycle,
+.work-order-history-section {
   padding-top: 1rem;
   border-top: 1px solid rgb(157 221 199 / 13%);
 }
 
-.work-order-assignment h3 {
+.work-order-assignment h3,
+.work-order-lifecycle h3,
+.work-order-history-section h3 {
   margin: 0;
 }
 
@@ -1293,6 +1315,52 @@ code {
   border-radius: 0.65rem;
   color: #f3f7f5;
   background: #071814;
+}
+
+.work-order-lifecycle > button {
+  justify-self: start;
+}
+
+.work-order-history-list {
+  display: grid;
+  gap: 0.7rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.work-order-history-list li {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.85rem;
+  border: 1px solid rgb(157 221 199 / 12%);
+  border-radius: 0.7rem;
+  background: rgb(7 24 20 / 58%);
+}
+
+.work-order-history-list li > div {
+  display: grid;
+  min-width: 0;
+  gap: 0.3rem;
+  overflow-wrap: anywhere;
+}
+
+.work-order-history-list strong {
+  color: #eaf2ef;
+  font-size: 0.88rem;
+}
+
+.work-order-history-list span,
+.work-order-history-list time {
+  color: #a8bab4;
+  font-size: 0.78rem;
+}
+
+.work-order-history-list time {
+  flex-shrink: 0;
+  text-align: right;
 }
 
 .operations-section {
@@ -1530,6 +1598,55 @@ code {
   padding-top: 0.25rem;
 }
 
+.audit-section {
+  min-width: 0;
+}
+
+.audit-table-scroll {
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.audit-table {
+  width: 100%;
+  min-width: 44rem;
+  border-collapse: collapse;
+  color: #dfeae6;
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+
+.audit-table caption {
+  margin-bottom: 0.55rem;
+  color: #eaf2ef;
+  font-weight: 700;
+  text-align: left;
+}
+
+.audit-table th,
+.audit-table td {
+  padding: 0.7rem;
+  border-bottom: 1px solid rgb(157 221 199 / 12%);
+  text-align: left;
+  vertical-align: top;
+}
+
+.audit-table th {
+  color: #91a39d;
+  font-size: 0.7rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.audit-table code {
+  display: block;
+  margin-top: 0.25rem;
+  color: #a8bab4;
+  font-size: 0.72rem;
+  overflow-wrap: anywhere;
+}
+
 .status-list {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1629,6 +1746,7 @@ code {
   .alert-history-list li,
   .work-order-section__heading,
   .work-order-detail__header,
+  .work-order-history-list li,
   .operations-section__heading,
   .operations-detail__header {
     display: grid;
@@ -1659,7 +1777,8 @@ code {
     text-align: left;
   }
 
-  .alert-history-list time {
+  .alert-history-list time,
+  .work-order-history-list time {
     text-align: left;
   }
 

@@ -1,10 +1,15 @@
 package io.github.moar0210.assetpulse.security;
 
+import io.github.moar0210.assetpulse.audit.AuditAction;
+import io.github.moar0210.assetpulse.audit.AuditService;
+import io.github.moar0210.assetpulse.identity.AuthenticatedActor;
 import io.github.moar0210.assetpulse.identity.DatabaseUserDetailsService;
 import jakarta.servlet.DispatcherType;
 import java.util.List;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.dao.DataAccessException;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.authentication.AuthenticationManager;
@@ -27,6 +32,7 @@ import org.springframework.security.web.csrf.HttpSessionCsrfTokenRepository;
 import org.springframework.security.web.csrf.InvalidCsrfTokenException;
 import org.springframework.security.web.csrf.MissingCsrfTokenException;
 import org.springframework.security.web.servlet.util.matcher.PathPatternRequestMatcher;
+import org.springframework.transaction.TransactionException;
 
 @Configuration(proxyBeanMethods = false)
 @EnableWebSecurity
@@ -72,7 +78,8 @@ public class SecurityConfiguration {
             HttpSecurity http,
             SecurityContextRepository securityContextRepository,
             HttpSessionCsrfTokenRepository csrfTokenRepository,
-            ApiProblemWriter problemWriter)
+            ApiProblemWriter problemWriter,
+            AuditService auditService)
             throws Exception {
         CsrfTokenRequestAttributeHandler csrfRequestHandler =
                 new CsrfTokenRequestAttributeHandler();
@@ -137,9 +144,38 @@ public class SecurityConfiguration {
                                         .clearAuthentication(true)
                                         .deleteCookies("ASSETPULSE_SESSION")
                                         .logoutSuccessHandler(
-                                                (request, response, authentication) ->
-                                                        response.setStatus(
-                                                                HttpStatus.NO_CONTENT.value())))
+                                                (request, response, authentication) -> {
+                                                    if (authentication != null
+                                                            && authentication.isAuthenticated()
+                                                            && authentication.getPrincipal()
+                                                                    instanceof
+                                                                    AuthenticatedActor actor) {
+                                                        try {
+                                                            auditService.record(
+                                                                    actor.organisationId(),
+                                                                    actor.userId(),
+                                                                    AuditAction.SESSION_ENDED,
+                                                                    actor.userId(),
+                                                                    CorrelationIdFilter.from(
+                                                                            request));
+                                                        } catch (DataAccessException
+                                                                | TransactionException exception) {
+                                                            problemWriter.write(
+                                                                    request,
+                                                                    response,
+                                                                    HttpStatus.SERVICE_UNAVAILABLE
+                                                                            .value(),
+                                                                    "AUDIT_UNAVAILABLE",
+                                                                    "Audit unavailable",
+                                                                    "The session ended, but its audit record could not be saved.");
+                                                            return;
+                                                        }
+                                                    }
+                                                    response.setHeader(
+                                                            HttpHeaders.CACHE_CONTROL, "no-store");
+                                                    response.setStatus(
+                                                            HttpStatus.NO_CONTENT.value());
+                                                }))
                 .authorizeHttpRequests(
                         authorization ->
                                 authorization
@@ -155,6 +191,10 @@ public class SecurityConfiguration {
                                         .permitAll()
                                         .requestMatchers(HttpMethod.GET, "/api/v1/session")
                                         .authenticated()
+                                        .requestMatchers(HttpMethod.GET, "/api/v1/audit-events")
+                                        .hasRole("OPERATIONS_ADMIN")
+                                        .requestMatchers(HttpMethod.HEAD, "/api/v1/audit-events")
+                                        .hasRole("OPERATIONS_ADMIN")
                                         .requestMatchers(HttpMethod.GET, "/api/v1/assets")
                                         .hasAnyRole("OPERATIONS_ADMIN", "TECHNICIAN", "VIEWER")
                                         .requestMatchers(HttpMethod.GET, "/api/v1/assets/{assetId}")
@@ -192,6 +232,11 @@ public class SecurityConfiguration {
                                                 "/api/v1/work-orders",
                                                 "/api/v1/work-orders/{workOrderId}/assign")
                                         .hasRole("OPERATIONS_ADMIN")
+                                        .requestMatchers(
+                                                HttpMethod.POST,
+                                                "/api/v1/work-orders/{workOrderId}/start",
+                                                "/api/v1/work-orders/{workOrderId}/complete")
+                                        .hasRole("TECHNICIAN")
                                         .requestMatchers(
                                                 HttpMethod.GET, "/api/v1/processing-events/dead")
                                         .hasRole("OPERATIONS_ADMIN")

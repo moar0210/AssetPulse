@@ -4,6 +4,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
@@ -1051,6 +1052,14 @@ describe("operations workspace navigation", () => {
     lastErrorCode: "PROCESSING_FAILED",
     lastErrorMessage: "Processing failed; another attempt may be scheduled.",
   } as const;
+  const auditEvent = {
+    id: "a0000000-0000-0000-0000-000000000001",
+    actor: { id: identity.userId, displayName: identity.displayName },
+    action: "AUTHENTICATION_SUCCEEDED",
+    subject: { type: "USER", id: identity.userId },
+    occurredAt: "2026-08-28T10:00:00Z",
+    correlationId: "b0000000-0000-0000-0000-000000000001",
+  } as const;
 
   it("shows Operations to an admin and wires App-held CSRF to a bodyless retry", async () => {
     let queueReads = 0;
@@ -1068,6 +1077,9 @@ describe("operations workspace navigation", () => {
           limit: 50,
         });
       }
+      if (url === "/api/v1/audit-events?limit=50") {
+        return jsonResponse({ events: [auditEvent], limit: 50 });
+      }
       if (url === `/api/v1/processing-events/${processingEventId}/retry`) {
         expect(init?.method).toBe("POST");
         return new Response(null, { status: 204 });
@@ -1080,6 +1092,10 @@ describe("operations workspace navigation", () => {
     expect(
       await screen.findByRole("heading", { name: "Processing operations" }),
     ).toBeVisible();
+    const auditTable = await screen.findByRole("table", {
+      name: "Latest organisation audit events (up to 50)",
+    });
+    expect(within(auditTable).getByText("Signed in")).toBeVisible();
     fireEvent.click(
       await screen.findByRole("button", {
         name: `View dead processing event ${processingEventId}`,
@@ -1097,16 +1113,22 @@ describe("operations workspace navigation", () => {
       expect.objectContaining({ "X-CSRF-TOKEN": "csrf-token-1" }),
     );
     expect(retryCall?.[1]?.body).toBeUndefined();
+    expect(auditTable).toBeVisible();
+    expect(
+      fetchMock.mock.calls.filter(
+        ([url]) => url === "/api/v1/audit-events?limit=50",
+      ),
+    ).toHaveLength(1);
   });
 
-  it("does not expose Operations navigation to technicians or viewers", async () => {
+  it("does not expose Operations navigation or request AUD-01 audit data for technicians or viewers", async () => {
     const restrictedRoles = [
       { code: "TECHNICIAN", displayName: "Technician" },
       { code: "VIEWER", displayName: "Viewer" },
     ] as const;
 
     for (const role of restrictedRoles) {
-      installFetch(async (url) => {
+      const fetchMock = installFetch(async (url) => {
         if (url === "/api/v1/status") {
           return statusResponse();
         }
@@ -1119,7 +1141,135 @@ describe("operations workspace navigation", () => {
       const rendered = render(<App />);
       await screen.findByRole("heading", { name: "Welcome, Nora Admin" });
       expect(screen.queryByRole("button", { name: "Operations" })).toBeNull();
+      expect(screen.queryByRole("heading", { name: "Audit trail" })).toBeNull();
+      expect(
+        fetchMock.mock.calls.some(([url]) =>
+          String(url).startsWith("/api/v1/audit-events"),
+        ),
+      ).toBe(false);
       rendered.unmount();
     }
+  });
+
+  it("keeps AUD-01 audit refresh independent while processing recovery remains locked", async () => {
+    let queueReads = 0;
+    let auditReads = 0;
+    let retryCalls = 0;
+    installFetch(async (url) => {
+      if (url === "/api/v1/status") return statusResponse();
+      if (url === "/api/v1/session/csrf") return jsonResponse(csrfToken);
+      if (url === "/api/v1/processing-events/dead?limit=50") {
+        queueReads += 1;
+        return queueReads === 1
+          ? jsonResponse({ events: [deadProcessingEvent], limit: 50 })
+          : jsonResponse({}, 503);
+      }
+      if (url === `/api/v1/processing-events/${processingEventId}/retry`) {
+        retryCalls += 1;
+        return jsonResponse({}, 409);
+      }
+      if (url === "/api/v1/audit-events?limit=50") {
+        auditReads += 1;
+        return jsonResponse({
+          events: auditReads === 1 ? [auditEvent] : [],
+          limit: 50,
+        });
+      }
+      return jsonResponse(identity);
+    });
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Operations" }));
+    await screen.findByText("Signed in");
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: `View dead processing event ${processingEventId}`,
+      }),
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Retry processing event" }),
+    );
+    expect(
+      await screen.findByRole("button", { name: "Latest state required" }),
+    ).toBeDisabled();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Refresh audit trail" }),
+    );
+    expect(
+      await screen.findByText(
+        "No audit events have been recorded for your organisation.",
+      ),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: "Latest state required" }),
+    ).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "Back to operations" }),
+    ).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "Retry latest state" }),
+    ).toBeEnabled();
+    expect(queueReads).toBe(2);
+    expect(auditReads).toBe(2);
+    expect(retryCalls).toBe(1);
+  });
+
+  it("keeps processing operations available when AUD-01 audit access is denied", async () => {
+    installFetch(async (url) => {
+      if (url === "/api/v1/status") return statusResponse();
+      if (url === "/api/v1/session/csrf") return jsonResponse(csrfToken);
+      if (url === "/api/v1/processing-events/dead?limit=50") {
+        return jsonResponse({ events: [deadProcessingEvent], limit: 50 });
+      }
+      if (url === "/api/v1/audit-events?limit=50") return jsonResponse({}, 403);
+      return jsonResponse(identity);
+    });
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Operations" }));
+    expect(
+      await screen.findByRole("heading", { name: "Audit access denied" }),
+    ).toBeVisible();
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: `View dead processing event ${processingEventId}`,
+      }),
+    );
+    expect(
+      screen.getByRole("button", { name: "Retry processing event" }),
+    ).toBeEnabled();
+  });
+
+  it("returns to sign-in when an AUD-01 read detects session expiry", async () => {
+    let expired = false;
+    const fetchMock = installFetch(async (url) => {
+      if (url === "/api/v1/status") return statusResponse();
+      if (url === "/api/v1/session/csrf") return jsonResponse(csrfToken);
+      if (url === "/api/v1/processing-events/dead?limit=50") {
+        return jsonResponse({ events: [], limit: 50 });
+      }
+      if (url === "/api/v1/audit-events?limit=50") {
+        expired = true;
+        return jsonResponse({}, 401);
+      }
+      return expired ? jsonResponse({}, 401) : jsonResponse(identity);
+    });
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Operations" }));
+    expect(
+      await screen.findByRole("button", { name: "Sign in" }),
+    ).toBeVisible();
+    expect(screen.queryByRole("heading", { name: "Audit trail" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Operations" })).toBeNull();
+    expect(
+      fetchMock.mock.calls.filter(
+        ([url]) => url === "/api/v1/audit-events?limit=50",
+      ),
+    ).toHaveLength(1);
+    expect(
+      fetchMock.mock.calls.some(([, init]) => init?.method === "POST"),
+    ).toBe(false);
   });
 });

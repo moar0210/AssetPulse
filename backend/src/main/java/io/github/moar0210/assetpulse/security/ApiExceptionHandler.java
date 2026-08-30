@@ -4,6 +4,8 @@ import io.github.moar0210.assetpulse.alerts.AlertNotFoundException;
 import io.github.moar0210.assetpulse.alerts.AlertStateConflictException;
 import io.github.moar0210.assetpulse.alerts.InvalidAlertQueryException;
 import io.github.moar0210.assetpulse.assets.AssetNotFoundException;
+import io.github.moar0210.assetpulse.audit.AuditUnavailableException;
+import io.github.moar0210.assetpulse.audit.InvalidAuditQueryException;
 import io.github.moar0210.assetpulse.identity.AlreadyAuthenticatedException;
 import io.github.moar0210.assetpulse.identity.AuthenticationFailedException;
 import io.github.moar0210.assetpulse.identity.AuthenticationUnavailableException;
@@ -104,6 +106,26 @@ public class ApiExceptionHandler {
                 "The alert cannot transition from its current state.");
     }
 
+    @ExceptionHandler(AuditUnavailableException.class)
+    ResponseEntity<ProblemDetail> auditUnavailable(HttpServletRequest request) {
+        return problem(
+                request,
+                HttpStatus.SERVICE_UNAVAILABLE,
+                "AUDIT_UNAVAILABLE",
+                "Audit unavailable",
+                "Audit events are temporarily unavailable. Try again later.");
+    }
+
+    @ExceptionHandler(InvalidAuditQueryException.class)
+    ResponseEntity<ProblemDetail> invalidAuditQuery(HttpServletRequest request) {
+        return problem(
+                request,
+                HttpStatus.BAD_REQUEST,
+                "INVALID_AUDIT_QUERY",
+                "Invalid audit query",
+                "Provide a valid audit result limit from 1 to 100.");
+    }
+
     @ExceptionHandler(InvalidAlertQueryException.class)
     ResponseEntity<ProblemDetail> invalidAlertQuery(HttpServletRequest request) {
         return problem(
@@ -161,7 +183,7 @@ public class ApiExceptionHandler {
                 HttpStatus.CONFLICT,
                 "WORK_ORDER_STATE_CONFLICT",
                 "Work-order state conflict",
-                "The work order cannot be assigned from its current state and version.");
+                "The work order cannot be changed from its current state and version.");
     }
 
     @ExceptionHandler(InvalidWorkOrderQueryException.class)
