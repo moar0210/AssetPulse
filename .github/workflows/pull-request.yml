@@ -1,14 +1,17 @@
-name: Pull request verification
+name: Verification
 
 on:
   pull_request:
+  push:
+    branches:
+      - main
   workflow_call:
 
 permissions:
   contents: read
 
 concurrency:
-  group: pull-request-${{ github.workflow }}-${{ github.ref }}
+  group: verification-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -133,23 +136,12 @@ jobs:
           --tag assetpulse-database-bootstrap:local
           infra/postgres
 
-      - name: Validate Azure template
-        shell: bash
-        run: |
-          compiled_template="$RUNNER_TEMP/assetpulse-main.json"
-          az bicep build --file infra/azure/main.bicep --outfile "$compiled_template"
-          timeout_setting_count="$(jq '[
-            .resources[]
-            | select(.type == "Microsoft.App/containerApps")
-            | .properties.template.containers[]
-            | select(.name == "backend")
-            | .env[]
-            | select(
-                .name == "ASSETPULSE_ALERT_STREAM_TIMEOUT_MILLIS"
-                and .value == "210000"
-              )
-          ] | length' "$compiled_template")"
-          test "$timeout_setting_count" = "1"
+      - name: Build zero-cost hosting image
+        run: >-
+          docker build
+          --file infra/render/Dockerfile
+          --tag assetpulse-web:local
+          .
 
       - name: Verify non-root runtime users
         shell: bash
@@ -157,16 +149,32 @@ jobs:
           test "$(docker image inspect assetpulse-backend:local --format '{{.Config.User}}')" = "10001:10001"
           test "$(docker image inspect assetpulse-frontend:local --format '{{.Config.User}}')" = "nginx"
           test "$(docker image inspect assetpulse-database-bootstrap:local --format '{{.Config.User}}')" = "postgres"
+          test "$(docker image inspect assetpulse-web:local --format '{{.Config.User}}')" = "10001:10001"
 
-      - name: Verify Azure frontend runtime rendering
+      - name: Verify configurable frontend runtime rendering
         shell: bash
         run: |
           rendered="$(docker run --rm \
             --read-only \
             --tmpfs /tmp \
             --env BACKEND_UPSTREAM=127.0.0.1:8081 \
+            --env FRONTEND_PORT=10000 \
             assetpulse-frontend:local \
             nginx -T -c /tmp/nginx.conf 2>&1)"
+          grep -F "listen 10000;" <<< "$rendered"
+          test "$(grep -c -F "proxy_pass http://127.0.0.1:8081;" <<< "$rendered")" = "2"
+          grep -F "proxy_buffering off;" <<< "$rendered"
+
+      - name: Verify hosting image runtime contract
+        shell: bash
+        run: |
+          rendered="$(docker run --rm \
+            --entrypoint sh \
+            --env FRONTEND_PORT=10000 \
+            --env BACKEND_UPSTREAM=127.0.0.1:8081 \
+            assetpulse-web:local \
+            -c 'envsubst '\''${FRONTEND_PORT} ${BACKEND_UPSTREAM}'\'' < /etc/nginx/templates/nginx.conf.template > /tmp/nginx.conf && nginx -T -c /tmp/nginx.conf 2>&1')"
+          grep -F "listen 10000;" <<< "$rendered"
           test "$(grep -c -F "proxy_pass http://127.0.0.1:8081;" <<< "$rendered")" = "2"
           grep -F "proxy_buffering off;" <<< "$rendered"
 
@@ -333,10 +341,46 @@ jobs:
       - name: Verify local same-origin behavior
         run: node infra/smoke/public-smoke.mjs --base-url http://127.0.0.1:8080 --allow-http
 
+      - name: Start zero-cost hosting image
+        run: >-
+          docker run
+          --detach
+          --name assetpulse-hosting-ci
+          --network assetpulse-ci_database
+          --memory 512m
+          --publish 127.0.0.1:18080:10000
+          --env PORT=10000
+          --env SPRING_DATASOURCE_URL=jdbc:postgresql://postgres:5432/assetpulse
+          --env SPRING_DATASOURCE_USERNAME="$SPRING_DATASOURCE_USERNAME"
+          --env SPRING_DATASOURCE_PASSWORD="$SPRING_DATASOURCE_PASSWORD"
+          --env ASSETPULSE_SESSION_COOKIE_SECURE=false
+          assetpulse-web:local
+
+      - name: Wait for zero-cost hosting image
+        shell: bash
+        run: |
+          for attempt in {1..60}; do
+            if curl --fail --silent --show-error http://127.0.0.1:18080/api/v1/status; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs assetpulse-hosting-ci
+          exit 1
+
+      - name: Verify hosted-image same-origin behavior
+        run: node infra/smoke/public-smoke.mjs --base-url http://127.0.0.1:18080 --allow-http
+
       - name: Show application logs after failure
         if: failure()
-        run: docker compose --project-name assetpulse-ci logs --no-color
+        shell: bash
+        run: |
+          docker logs assetpulse-hosting-ci 2>&1 || true
+          docker compose --project-name assetpulse-ci logs --no-color
 
-      - name: Remove isolated application stack
+      - name: Remove isolated application stacks
         if: always()
-        run: docker compose --project-name assetpulse-ci down --volumes --remove-orphans
+        shell: bash
+        run: |
+          docker rm --force assetpulse-hosting-ci 2>/dev/null || true
+          docker compose --project-name assetpulse-ci down --volumes --remove-orphans

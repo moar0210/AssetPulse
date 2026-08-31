@@ -6,4 +6,5 @@
 *.jar binary
 *.jpg binary
 *.png binary
+*.pdf binary
 *.woff2 binary
