@@ -28,6 +28,7 @@ const API_TIMEOUT_MS = 5_000;
 const actionLabels: Readonly<Record<AuditAction, string>> = {
   AUTHENTICATION_SUCCEEDED: "Signed in",
   SESSION_ENDED: "Signed out",
+  DEMO_RESET: "Demo state reset",
   ALERT_ACKNOWLEDGED: "Alert acknowledged",
   ALERT_RESOLVED: "Alert resolved",
   WORK_ORDER_CREATED: "Work order created",

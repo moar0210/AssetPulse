@@ -104,6 +104,15 @@ jobs:
       - name: Test public API scenarios
         run: npm test
 
+      - name: Check bounded k6 scenario syntax
+        working-directory: .
+        shell: bash
+        run: node --input-type=module --check < infra/performance/telemetry-to-alert.k6.js
+
+      - name: Test bounded k6 alert evidence
+        working-directory: .
+        run: node --test infra/performance/alert-evidence.test.mjs
+
   containers:
     name: Containers
     runs-on: ubuntu-latest
@@ -140,8 +149,44 @@ jobs:
         run: >-
           docker build
           --file infra/render/Dockerfile
+          --build-arg ASSETPULSE_BUILD_REVISION="$GITHUB_SHA"
           --tag assetpulse-web:local
           .
+
+      - name: Scan filesystem dependencies for critical vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln
+          vuln-type: os,library
+          severity: CRITICAL
+          exit-code: "1"
+          format: table
+          hide-progress: true
+
+      - name: Scan repository for detected secrets
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: secret
+          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+          exit-code: "1"
+          format: table
+          hide-progress: true
+
+      - name: Scan zero-cost hosting image for critical vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: assetpulse-web:local
+          scanners: vuln
+          vuln-type: os,library
+          severity: CRITICAL
+          exit-code: "1"
+          format: table
+          hide-progress: true
 
       - name: Verify non-root runtime users
         shell: bash
@@ -163,11 +208,21 @@ jobs:
             nginx -T -c /tmp/nginx.conf 2>&1)"
           grep -F "listen 10000;" <<< "$rendered"
           test "$(grep -c -F "proxy_pass http://127.0.0.1:8081;" <<< "$rendered")" = "2"
+          test "$(grep -c -F 'proxy_set_header X-AssetPulse-Client-Address $assetpulse_client_address;' <<< "$rendered")" = "2"
+          test "$(grep -c -F 'proxy_set_header X-Forwarded-For $assetpulse_client_address;' <<< "$rendered")" = "2"
+          ! grep -F '$proxy_add_x_forwarded_for' <<< "$rendered"
           grep -F "proxy_buffering off;" <<< "$rendered"
 
       - name: Verify hosting image runtime contract
         shell: bash
         run: |
+          test "$(docker image inspect assetpulse-web:local --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$GITHUB_SHA"
+          image_environment="$(docker image inspect assetpulse-web:local --format '{{json .Config.Env}}')"
+          grep -F -- '-XX:ActiveProcessorCount=1' <<< "$image_environment"
+          grep -F -- '-XX:MaxRAMPercentage=55.0' <<< "$image_environment"
+          grep -F -- 'SPRING_DATASOURCE_HIKARI_MAXIMUM_POOL_SIZE=4' <<< "$image_environment"
+          grep -F -- 'SERVER_TOMCAT_THREADS_MAX=20' <<< "$image_environment"
+          grep -F -- 'ASSETPULSE_TELEMETRY_PROCESSING_POLL_DELAY_MILLIS=5000' <<< "$image_environment"
           rendered="$(docker run --rm \
             --entrypoint sh \
             --env FRONTEND_PORT=10000 \
@@ -176,6 +231,9 @@ jobs:
             -c 'envsubst '\''${FRONTEND_PORT} ${BACKEND_UPSTREAM}'\'' < /etc/nginx/templates/nginx.conf.template > /tmp/nginx.conf && nginx -T -c /tmp/nginx.conf 2>&1')"
           grep -F "listen 10000;" <<< "$rendered"
           test "$(grep -c -F "proxy_pass http://127.0.0.1:8081;" <<< "$rendered")" = "2"
+          test "$(grep -c -F 'proxy_set_header X-AssetPulse-Client-Address $assetpulse_client_address;' <<< "$rendered")" = "2"
+          test "$(grep -c -F 'proxy_set_header X-Forwarded-For $assetpulse_client_address;' <<< "$rendered")" = "2"
+          ! grep -F '$proxy_add_x_forwarded_for' <<< "$rendered"
           grep -F "proxy_buffering off;" <<< "$rendered"
 
       - name: Reject unbounded bootstrap timeout
@@ -342,24 +400,32 @@ jobs:
         run: node infra/smoke/public-smoke.mjs --base-url http://127.0.0.1:8080 --allow-http
 
       - name: Start zero-cost hosting image
-        run: >-
-          docker run
-          --detach
-          --name assetpulse-hosting-ci
-          --network assetpulse-ci_database
-          --memory 512m
-          --publish 127.0.0.1:18080:10000
-          --env PORT=10000
-          --env SPRING_DATASOURCE_URL=jdbc:postgresql://postgres:5432/assetpulse
-          --env SPRING_DATASOURCE_USERNAME="$SPRING_DATASOURCE_USERNAME"
-          --env SPRING_DATASOURCE_PASSWORD="$SPRING_DATASOURCE_PASSWORD"
-          --env ASSETPULSE_SESSION_COOKIE_SECURE=false
-          assetpulse-web:local
+        shell: bash
+        run: |
+          docker create \
+            --name assetpulse-hosting-ci \
+            --network assetpulse-ci_database \
+            --cpus 0.1 \
+            --memory 512m \
+            --pids-limit 128 \
+            --read-only \
+            --tmpfs /tmp:rw,nosuid,nodev,size=128m \
+            --publish 127.0.0.1:18080:10000 \
+            --env PORT=10000 \
+            --env SPRING_DATASOURCE_URL=jdbc:postgresql://postgres:5432/assetpulse \
+            --env SPRING_DATASOURCE_USERNAME="$SPRING_DATASOURCE_USERNAME" \
+            --env SPRING_DATASOURCE_PASSWORD="$SPRING_DATASOURCE_PASSWORD" \
+            --env ASSETPULSE_SESSION_COOKIE_SECURE=true \
+            --env ASSETPULSE_BUILD_REVISION="$GITHUB_SHA" \
+            assetpulse-web:local
+          docker network connect assetpulse-ci_edge assetpulse-hosting-ci
+          docker start assetpulse-hosting-ci
 
       - name: Wait for zero-cost hosting image
         shell: bash
         run: |
-          for attempt in {1..60}; do
+          # Leave bounded headroom for a cold JVM start under the 0.1-CPU runtime limit.
+          for attempt in {1..180}; do
             if curl --fail --silent --show-error http://127.0.0.1:18080/api/v1/status; then
               exit 0
             fi
@@ -370,6 +436,13 @@ jobs:
 
       - name: Verify hosted-image same-origin behavior
         run: node infra/smoke/public-smoke.mjs --base-url http://127.0.0.1:18080 --allow-http
+
+      - name: Record bounded runtime fit
+        shell: bash
+        run: |
+          runtime_state="$(docker inspect assetpulse-hosting-ci --format '{{.HostConfig.NanoCpus}}|{{.HostConfig.Memory}}|{{.HostConfig.PidsLimit}}|{{.State.OOMKilled}}|{{.RestartCount}}')"
+          test "$runtime_state" = "100000000|536870912|128|false|0"
+          docker stats assetpulse-hosting-ci --no-stream --format 'name={{.Name}} cpu={{.CPUPerc}} memory={{.MemUsage}} pids={{.PIDs}}'
 
       - name: Show application logs after failure
         if: failure()

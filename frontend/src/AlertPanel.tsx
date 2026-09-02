@@ -379,7 +379,7 @@ function AlertDetailPanel({
         detail: updated,
         refreshFailed: false,
       });
-      focusFeedbackAfterUpdate.current = updated.status === "RESOLVED";
+      focusFeedbackAfterUpdate.current = true;
       setActionFeedback({
         kind: "success",
         message:

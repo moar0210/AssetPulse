@@ -43,6 +43,13 @@ const assets = [
   },
 ] as const;
 
+const dashboardSummary = {
+  assetCount: assets.length,
+  openAlertCount: 0,
+  activeWorkOrderCount: 0,
+  recentActivity: [],
+} as const;
+
 const assetDetail = {
   ...assets[0],
   sensors: [
@@ -190,6 +197,10 @@ function installFetch(
 ) {
   const fetchMock = vi.fn<typeof fetch>((input, init) => {
     const url = String(input);
+    if (url === "/api/v1/dashboard") {
+      return Promise.resolve(jsonResponse(dashboardSummary));
+    }
+
     if (url === "/api/v1/assets") {
       return assetHandler(init);
     }
@@ -211,6 +222,10 @@ function installFetch(
   });
   vi.stubGlobal("fetch", fetchMock);
   return fetchMock;
+}
+
+async function openAssets() {
+  fireEvent.click(await screen.findByRole("button", { name: "Assets" }));
 }
 
 function statusResponse() {
@@ -260,7 +275,7 @@ describe("seeded session application", () => {
     expect(await screen.findByText("available")).toBeInTheDocument();
   });
 
-  it("renders trusted identity and organisation assets after discovery", async () => {
+  it("lands on the dashboard and preserves organisation assets behind navigation", async () => {
     installFetch(async (url) => {
       if (url === "/api/v1/status") {
         return statusResponse();
@@ -280,11 +295,57 @@ describe("seeded session application", () => {
     expect(screen.getByText("Northstar Operations")).toBeInTheDocument();
     expect(screen.getByText("Operations Admin")).toBeInTheDocument();
     expect(
+      screen.getByRole("button", { name: "Dashboard", current: "page" }),
+    ).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Dashboard" })).toBeVisible();
+
+    await openAssets();
+    expect(
       await screen.findByRole("heading", { name: "Assets" }),
     ).toBeInTheDocument();
     expect(await screen.findByText("Boiler Feed Pump")).toBeInTheDocument();
     expect(screen.getByText("PUMP-101")).toBeInTheDocument();
     expect(screen.getByText("Cooling Water Pump")).toBeInTheDocument();
+  });
+
+  it("moves focus to the current Alerts navigation after a scenario launch", async () => {
+    installEventSource();
+    installFetch(async (url, init) => {
+      if (url === "/api/v1/status") {
+        return statusResponse();
+      }
+      if (url === "/api/v1/session/csrf") {
+        return jsonResponse(csrfToken);
+      }
+      if (url === "/api/v1/alerts?limit=50") {
+        return jsonResponse({ alerts: [], limit: 50 });
+      }
+      if (url === "/api/v1/telemetry-batches" && init?.method === "POST") {
+        const request = JSON.parse(String(init.body)) as {
+          idempotencyKey: string;
+          readings: readonly unknown[];
+        };
+        return jsonResponse({
+          batchId: "70000000-0000-0000-0000-000000000001",
+          idempotencyKey: request.idempotencyKey,
+          readingCount: request.readings.length,
+          acceptedAt: "2026-09-01T00:00:00Z",
+        });
+      }
+      return jsonResponse(identity);
+    });
+
+    render(<App />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Launch and open alerts" }),
+    );
+
+    const alertsNavigation = await screen.findByRole("button", {
+      name: "Alerts",
+      current: "page",
+    });
+    await waitFor(() => expect(alertsNavigation).toHaveFocus());
+    expect(screen.getByRole("heading", { name: "Alerts" })).toBeVisible();
   });
 
   it("opens the authenticated alert queue and wires App-held CSRF to commands", async () => {
@@ -391,7 +452,7 @@ describe("seeded session application", () => {
       screen.getByRole("heading", { name: "Welcome, Nora Admin" }),
     ).toBeVisible();
     expect(
-      screen.getByRole("button", { name: "Assets", current: "page" }),
+      screen.getByRole("button", { name: "Dashboard", current: "page" }),
     ).toBeVisible();
     expect(sources[0]?.close).toHaveBeenCalledOnce();
 
@@ -422,6 +483,7 @@ describe("seeded session application", () => {
     expect(
       await screen.findByRole("heading", { name: "Welcome, Nora Admin" }),
     ).toBeInTheDocument();
+    await openAssets();
     expect(screen.getByRole("status")).toHaveTextContent("Loading assets");
     expect(screen.getByText("Northstar Operations")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Sign out" })).toBeEnabled();
@@ -443,6 +505,7 @@ describe("seeded session application", () => {
 
     render(<App />);
 
+    await openAssets();
     expect(await screen.findByText("No assets are available.")).toBeVisible();
     expect(screen.getByLabelText("Asset count")).toHaveTextContent("0");
     expect(screen.getByRole("button", { name: "Sign out" })).toBeEnabled();
@@ -470,6 +533,7 @@ describe("seeded session application", () => {
 
     render(<App />);
 
+    await openAssets();
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "could not load assets",
     );
@@ -497,6 +561,7 @@ describe("seeded session application", () => {
     });
 
     render(<App />);
+    await openAssets();
     fireEvent.click(
       await screen.findByRole("button", {
         name: "View details for Boiler Feed Pump (PUMP-101)",
@@ -549,6 +614,7 @@ describe("seeded session application", () => {
     });
 
     render(<App />);
+    await openAssets();
     fireEvent.click(
       await screen.findByRole("button", {
         name: "View details for Boiler Feed Pump (PUMP-101)",
@@ -584,6 +650,7 @@ describe("seeded session application", () => {
     });
 
     render(<App />);
+    await openAssets();
     fireEvent.click(
       await screen.findByRole("button", {
         name: "View details for Boiler Feed Pump (PUMP-101)",
@@ -625,6 +692,7 @@ describe("seeded session application", () => {
     });
 
     render(<App />);
+    await openAssets();
     fireEvent.click(
       await screen.findByRole("button", {
         name: "View details for Boiler Feed Pump (PUMP-101)",
@@ -661,6 +729,7 @@ describe("seeded session application", () => {
     );
 
     render(<App />);
+    await openAssets();
 
     expect(
       await screen.findByRole("button", { name: "Sign in" }),
@@ -689,6 +758,7 @@ describe("seeded session application", () => {
     });
 
     render(<App />);
+    await openAssets();
     fireEvent.click(
       await screen.findByRole("button", {
         name: "View details for Boiler Feed Pump (PUMP-101)",
@@ -871,6 +941,53 @@ describe("seeded session application", () => {
     );
     expect(screen.queryByText("Account does not exist")).toBeNull();
     expect(screen.getByLabelText("Password")).toHaveValue("");
+  });
+
+  it("stops login recovery on throttling and shows only a bounded retry hint", async () => {
+    let loginRequests = 0;
+    installFetch(async (url, init) => {
+      if (url === "/api/v1/status") {
+        return statusResponse();
+      }
+      if (url === "/api/v1/session/csrf") {
+        return jsonResponse(csrfToken);
+      }
+      if (init?.method === "POST") {
+        loginRequests += 1;
+        return new Response(
+          JSON.stringify({
+            code: "LOGIN_RATE_LIMITED",
+            detail: "Email-specific internal limiter state",
+          }),
+          {
+            status: 429,
+            headers: {
+              "Content-Type": "application/problem+json",
+              "Retry-After": "120",
+            },
+          },
+        );
+      }
+      return jsonResponse({}, 401);
+    });
+
+    render(<App />);
+    await screen.findByRole("button", { name: "Sign in" });
+    fireEvent.change(screen.getByLabelText("Email"), {
+      target: { value: "missing@example.com" },
+    });
+    fireEvent.change(screen.getByLabelText("Password"), {
+      target: { value: "incorrect" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Too many sign-in attempts. Try again in 120 seconds.",
+    );
+    expect(screen.queryByText(/internal limiter state/i)).toBeNull();
+    expect(screen.getByLabelText("Password")).toHaveValue("");
+    expect(screen.getByRole("button", { name: "Sign in" })).toBeEnabled();
+    expect(loginRequests).toBe(1);
   });
 
   it("signs out with CSRF, refreshes the token, and returns to login", async () => {

@@ -108,13 +108,13 @@ class AlertStreamSecurityTest {
         streamService.publish(
                 NORTHSTAR_ID, new AlertChangeEvent(alertId, AlertChangeType.OCCURRENCE_RECORDED));
 
-        awaitResponseContains(northstar, "event:alert-changed");
+        String expectedFrame =
+                "event:alert-changed\ndata:{\"alertId\":\""
+                        + alertId
+                        + "\",\"changeType\":\"OCCURRENCE_RECORDED\"}\n\n";
+        awaitResponseContains(northstar, expectedFrame);
         assertThat(northstar.getResponse().getContentAsString())
-                .isEqualTo(
-                        "event:ready\ndata:{}\n\n"
-                                + "event:alert-changed\ndata:{\"alertId\":\""
-                                + alertId
-                                + "\",\"changeType\":\"OCCURRENCE_RECORDED\"}\n\n")
+                .isEqualTo("event:ready\ndata:{}\n\n" + expectedFrame)
                 .doesNotContain("organisationId")
                 .doesNotContain("telemetry")
                 .doesNotContain("fingerprint");

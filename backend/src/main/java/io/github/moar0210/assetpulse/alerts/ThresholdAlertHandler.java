@@ -1,5 +1,6 @@
 package io.github.moar0210.assetpulse.alerts;
 
+import io.github.moar0210.assetpulse.observability.TelemetryFlowTrace;
 import io.github.moar0210.assetpulse.telemetry.TelemetryProcessingEvent;
 import io.github.moar0210.assetpulse.telemetry.TelemetryProcessingEventHandler;
 import java.util.UUID;
@@ -15,18 +16,21 @@ public class ThresholdAlertHandler implements TelemetryProcessingEventHandler {
     private final AlertFingerprint fingerprint;
     private final AlertCooldownPolicy cooldownPolicy;
     private final AlertChangePublisher changePublisher;
+    private final TelemetryFlowTrace flowTrace;
 
     public ThresholdAlertHandler(
             ThresholdAlertRepository repository,
             ThresholdRuleEvaluator evaluator,
             AlertFingerprint fingerprint,
             AlertCooldownPolicy cooldownPolicy,
-            AlertChangePublisher changePublisher) {
+            AlertChangePublisher changePublisher,
+            TelemetryFlowTrace flowTrace) {
         this.repository = repository;
         this.evaluator = evaluator;
         this.fingerprint = fingerprint;
         this.cooldownPolicy = cooldownPolicy;
         this.changePublisher = changePublisher;
+        this.flowTrace = flowTrace;
     }
 
     @Override
@@ -61,6 +65,7 @@ public class ThresholdAlertHandler implements TelemetryProcessingEventHandler {
                                     event.organisationId(),
                                     alertId,
                                     AlertChangeType.OCCURRENCE_RECORDED);
+                            flowTrace.alertRecordedAfterCommit(event, alertId);
                         });
     }
 }

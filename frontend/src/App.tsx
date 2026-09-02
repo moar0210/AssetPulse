@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
 
 import {
@@ -19,12 +19,14 @@ import {
   getCsrfToken,
   getCurrentSession,
   login,
+  LoginRateLimitedError,
   logout,
 } from "./api/session";
 import type { CsrfToken, LoginRequest, SessionIdentity } from "./api/session";
 import { getApiStatus } from "./api/status";
 import { AlertPanel } from "./AlertPanel";
 import { AuditPanel } from "./AuditPanel";
+import { DashboardPanel } from "./DashboardPanel";
 import { OperationsPanel } from "./OperationsPanel";
 import { TelemetryPanel } from "./TelemetryPanel";
 import { WorkOrderPanel } from "./WorkOrderPanel";
@@ -42,9 +44,17 @@ type ApplicationState =
     }>
   | Readonly<{ kind: "unavailable" }>;
 
-type LoginOutcome = "authenticated" | "invalid-credentials" | "unavailable";
+type LoginOutcome =
+  | "authenticated"
+  | "invalid-credentials"
+  | "unavailable"
+  | Readonly<{
+      kind: "rate-limited";
+      retryAfterSeconds: number | null;
+    }>;
 type LogoutOutcome = "logged-out" | "unavailable";
-type WorkspaceView = "assets" | "alerts" | "work-orders" | "operations";
+type WorkspaceView =
+  "dashboard" | "assets" | "alerts" | "work-orders" | "operations";
 
 type AssetListState =
   | Readonly<{ kind: "loading" }>
@@ -96,7 +106,10 @@ async function createSessionWithRecovery(
     try {
       await login(request, csrfToken, signal);
     } catch (error: unknown) {
-      if (error instanceof AuthenticationFailedError) {
+      if (
+        error instanceof AuthenticationFailedError ||
+        error instanceof LoginRateLimitedError
+      ) {
         throw error;
       }
       if (signal.aborted) {
@@ -214,7 +227,14 @@ function LoginPanel({
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [submissionState, setSubmissionState] = useState<
-    "idle" | "submitting" | "invalid-credentials" | "unavailable"
+    | "idle"
+    | "submitting"
+    | "invalid-credentials"
+    | "unavailable"
+    | Readonly<{
+        kind: "rate-limited";
+        retryAfterSeconds: number | null;
+      }>
   >("idle");
 
   const isSubmitting = submissionState === "submitting";
@@ -234,6 +254,9 @@ function LoginPanel({
       setSubmissionState("invalid-credentials");
     } else if (outcome === "unavailable") {
       setSubmissionState("unavailable");
+    } else if (typeof outcome === "object") {
+      setPassword("");
+      setSubmissionState(outcome);
     }
   }
 
@@ -287,6 +310,14 @@ function LoginPanel({
         {submissionState === "unavailable" && (
           <p className="form-message form-message--error" role="alert">
             AssetPulse is temporarily unavailable. Try again.
+          </p>
+        )}
+        {typeof submissionState === "object" && (
+          <p className="form-message form-message--error" role="alert">
+            Too many sign-in attempts.{" "}
+            {submissionState.retryAfterSeconds === null
+              ? "Try again later."
+              : `Try again in ${submissionState.retryAfterSeconds} seconds.`}
           </p>
         )}
 
@@ -555,9 +586,15 @@ function AuthenticatedPanel({
   });
   const [assetLoadAttempt, setAssetLoadAttempt] = useState(0);
   const [selectedAssetId, setSelectedAssetId] = useState<string | null>(null);
-  const [workspaceView, setWorkspaceView] = useState<WorkspaceView>("assets");
+  const [workspaceView, setWorkspaceView] =
+    useState<WorkspaceView>("dashboard");
+  const alertsNavigationRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
+    if (workspaceView !== "assets") {
+      return;
+    }
+
     let active = true;
     const controller = new AbortController();
     const timeoutId = window.setTimeout(
@@ -592,7 +629,7 @@ function AuthenticatedPanel({
       window.clearTimeout(timeoutId);
       controller.abort();
     };
-  }, [assetLoadAttempt, onSessionExpired]);
+  }, [assetLoadAttempt, onSessionExpired, workspaceView]);
 
   async function handleLogout() {
     if (logoutState === "submitting") {
@@ -642,12 +679,20 @@ function AuthenticatedPanel({
       <nav className="workspace-navigation" aria-label="Product sections">
         <button
           type="button"
+          aria-current={workspaceView === "dashboard" ? "page" : undefined}
+          onClick={() => setWorkspaceView("dashboard")}
+        >
+          Dashboard
+        </button>
+        <button
+          type="button"
           aria-current={workspaceView === "assets" ? "page" : undefined}
           onClick={() => setWorkspaceView("assets")}
         >
           Assets
         </button>
         <button
+          ref={alertsNavigationRef}
           type="button"
           aria-current={workspaceView === "alerts" ? "page" : undefined}
           onClick={() => setWorkspaceView("alerts")}
@@ -671,6 +716,18 @@ function AuthenticatedPanel({
           </button>
         )}
       </nav>
+
+      {workspaceView === "dashboard" && (
+        <DashboardPanel
+          identity={identity}
+          csrfToken={csrfToken}
+          onSessionExpired={onSessionExpired}
+          onOpenAlerts={() => {
+            setWorkspaceView("alerts");
+            alertsNavigationRef.current?.focus();
+          }}
+        />
+      )}
 
       {workspaceView === "assets" &&
         (selectedAssetId === null ? (
@@ -919,6 +976,12 @@ function App() {
     } catch (error: unknown) {
       if (error instanceof AuthenticationFailedError) {
         return "invalid-credentials";
+      }
+      if (error instanceof LoginRateLimitedError) {
+        return {
+          kind: "rate-limited",
+          retryAfterSeconds: error.retryAfterSeconds,
+        };
       }
 
       setApplicationState({ kind: "unavailable" });

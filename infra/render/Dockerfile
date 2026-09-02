@@ -26,6 +26,10 @@ RUN --mount=type=cache,target=/root/.m2 \
 
 FROM eclipse-temurin:21.0.11_10-jre-alpine-3.23 AS runtime
 
+ARG ASSETPULSE_BUILD_REVISION=unknown
+
+LABEL org.opencontainers.image.revision="${ASSETPULSE_BUILD_REVISION}"
+
 RUN apk add --no-cache bash gettext nginx tini \
     && addgroup -S -g 10001 assetpulse \
     && adduser -S -D -H -h /nonexistent -u 10001 -G assetpulse assetpulse
@@ -49,7 +53,9 @@ ENV FRONTEND_PORT=8080 \
     SPRING_DATASOURCE_HIKARI_MINIMUM_IDLE=0 \
     SERVER_TOMCAT_THREADS_MAX=20 \
     SERVER_TOMCAT_THREADS_MIN_SPARE=2 \
-    JAVA_TOOL_OPTIONS="-XX:MaxRAMPercentage=55.0 -XX:+ExitOnOutOfMemoryError -Djava.io.tmpdir=/tmp"
+    ASSETPULSE_TELEMETRY_PROCESSING_INITIAL_DELAY_MILLIS=5000 \
+    ASSETPULSE_TELEMETRY_PROCESSING_POLL_DELAY_MILLIS=5000 \
+    JAVA_TOOL_OPTIONS="-XX:ActiveProcessorCount=1 -XX:MaxRAMPercentage=55.0 -XX:+ExitOnOutOfMemoryError -Djava.io.tmpdir=/tmp"
 
 USER 10001:10001
 

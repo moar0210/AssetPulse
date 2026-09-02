@@ -4,6 +4,7 @@ import { afterEach, test } from "node:test";
 
 import {
   SmokeVerificationError,
+  assertStrictTransportSecurity,
   normalizeBaseUrl,
   runCli,
   runPublicSmoke,
@@ -13,6 +14,7 @@ const NORTHSTAR_ID = "00000000-0000-0000-0000-000000000001";
 const RIVERSIDE_ID = "00000000-0000-0000-0000-000000000002";
 const SESSION_COOKIE =
   "Path=/; Max-Age=1800; Secure; HttpOnly; SameSite=Strict";
+const READY_EVENT_FRAME = "event:ready\ndata:{}\n\n";
 
 const IDENTITY = {
   userId: "10000000-0000-0000-0000-000000000001",
@@ -84,12 +86,15 @@ function hasCookie(request, value) {
 async function startMockApplication({
   leakCrossTenantAsset = false,
   readinessFailures = 0,
+  sseFrames = [READY_EVENT_FRAME, READY_EVENT_FRAME],
+  endSseAfterFrame = false,
 } = {}) {
   const state = {
     authenticated: false,
     healthChecks: 0,
     loginAccepted: false,
     spoofRequest: null,
+    streamConnections: 0,
     handlerError: null,
   };
 
@@ -190,6 +195,30 @@ async function startMockApplication({
         return;
       }
 
+      if (
+        request.method === "GET" &&
+        url.pathname === "/api/v1/alerts/stream"
+      ) {
+        if (!state.authenticated || !hasCookie(request, "authenticated")) {
+          sendJson(response, 401, { code: "AUTHENTICATION_REQUIRED" });
+          return;
+        }
+
+        const frame =
+          sseFrames[state.streamConnections] ?? sseFrames.at(-1) ?? "";
+        state.streamConnections += 1;
+        response.writeHead(200, {
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-store",
+          Connection: "keep-alive",
+        });
+        response.write(frame);
+        if (endSseAfterFrame) {
+          response.end();
+        }
+        return;
+      }
+
       if (request.method === "DELETE" && url.pathname === "/api/v1/session") {
         if (
           !state.authenticated ||
@@ -248,6 +277,7 @@ test("the public smoke journey succeeds and sends direct tenant spoof markers", 
   assert.equal(application.state.handlerError, null);
   assert.equal(application.state.healthChecks, 2);
   assert.equal(application.state.loginAccepted, true);
+  assert.equal(application.state.streamConnections, 2);
   assert.deepEqual(application.state.spoofRequest, {
     organisationId: RIVERSIDE_ID,
     organisation: "riverside-manufacturing",
@@ -265,6 +295,7 @@ test("the public smoke journey succeeds and sends direct tenant spoof markers", 
     "seeded-northstar-login",
     "authenticated-csrf-rotation",
     "trusted-northstar-asset-scope",
+    "alert-stream-ready-and-reconnect",
     "logout",
     "post-logout-assets-denied",
   ]);
@@ -298,6 +329,97 @@ test("HTTP is rejected unless the local override is explicit", () => {
   assert.equal(
     normalizeBaseUrl("http://127.0.0.1:8080", { allowHttp: true }),
     "http://127.0.0.1:8080",
+  );
+  assert.throws(
+    () => normalizeBaseUrl("http://example.test", { allowHttp: true }),
+    /only target a loopback origin/u,
+  );
+});
+
+test("HTTPS responses require the exact bounded HSTS policy", () => {
+  const exact = new Response(null, {
+    headers: {
+      "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
+    },
+  });
+  assert.doesNotThrow(() =>
+    assertStrictTransportSecurity(exact, "https://assetpulse.example", "hsts"),
+  );
+
+  assert.throws(
+    () =>
+      assertStrictTransportSecurity(
+        new Response(),
+        "https://assetpulse.example",
+        "hsts",
+      ),
+    (error) =>
+      error instanceof SmokeVerificationError &&
+      error.check === "hsts" &&
+      /expected Strict-Transport-Security/u.test(error.message),
+  );
+  assert.throws(
+    () =>
+      assertStrictTransportSecurity(
+        new Response(null, {
+          headers: {
+            "Strict-Transport-Security": "max-age=300; includeSubDomains",
+          },
+        }),
+        "https://assetpulse.example",
+        "hsts",
+      ),
+    (error) =>
+      error instanceof SmokeVerificationError && error.check === "hsts",
+  );
+
+  assert.doesNotThrow(() =>
+    assertStrictTransportSecurity(
+      new Response(),
+      "http://127.0.0.1:8080",
+      "hsts",
+    ),
+  );
+});
+
+test("the public smoke rejects an incomplete ready event frame", async () => {
+  const application = await startMockApplication({
+    sseFrames: ["event:ready\ndata:{}\n"],
+    endSseAfterFrame: true,
+  });
+
+  await assert.rejects(
+    runPublicSmoke({
+      baseUrl: application.baseUrl,
+      allowHttp: true,
+      readinessTimeoutMs: 1_000,
+      readinessIntervalMs: 10,
+      requestTimeoutMs: 1_000,
+    }),
+    (error) =>
+      error instanceof SmokeVerificationError &&
+      error.check === "alert-stream-initial" &&
+      /complete frame/u.test(error.message),
+  );
+});
+
+test("the public smoke rejects a complete non-ready event frame", async () => {
+  const application = await startMockApplication({
+    sseFrames: ["event:heartbeat\ndata:{}\n\n"],
+  });
+
+  await assert.rejects(
+    runPublicSmoke({
+      baseUrl: application.baseUrl,
+      allowHttp: true,
+      readinessTimeoutMs: 1_000,
+      readinessIntervalMs: 10,
+      requestTimeoutMs: 1_000,
+    }),
+    (error) =>
+      error instanceof SmokeVerificationError &&
+      error.check === "alert-stream-initial" &&
+      /exact complete ready event frame/u.test(error.message),
   );
 });
 

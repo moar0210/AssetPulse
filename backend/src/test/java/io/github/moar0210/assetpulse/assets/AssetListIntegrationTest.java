@@ -217,7 +217,7 @@ class AssetListIntegrationTest {
     }
 
     @Test
-    void assetMutationRoutesRemainAbsent() throws Exception {
+    void assetMutationRoutesAreDeniedByDefault() throws Exception {
         MockHttpSession session = login("admin@northstar.example");
         CsrfExchange csrf = csrf(session);
         List<MockHttpServletRequestBuilder> mutations =
@@ -233,7 +233,10 @@ class AssetListIntegrationTest {
                                     .header(csrf.headerName(), csrf.token())
                                     .contentType(MediaType.APPLICATION_JSON)
                                     .content("{}"))
-                    .andExpect(status().isMethodNotAllowed());
+                    .andExpect(status().isForbidden())
+                    .andExpect(
+                            content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
+                    .andExpect(jsonPath("$.code").value("ACCESS_DENIED"));
         }
     }
 
@@ -309,7 +312,7 @@ class AssetListIntegrationTest {
     }
 
     @Test
-    void assetDetailMutationRoutesRemainAbsent() throws Exception {
+    void assetDetailMutationRoutesAreDeniedByDefault() throws Exception {
         MockHttpSession session = login("admin@northstar.example");
         CsrfExchange csrf = csrf(session);
         for (MockHttpServletRequestBuilder mutation :
@@ -323,7 +326,10 @@ class AssetListIntegrationTest {
                                     .header(csrf.headerName(), csrf.token())
                                     .contentType(MediaType.APPLICATION_JSON)
                                     .content("{}"))
-                    .andExpect(status().isMethodNotAllowed());
+                    .andExpect(status().isForbidden())
+                    .andExpect(
+                            content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
+                    .andExpect(jsonPath("$.code").value("ACCESS_DENIED"));
         }
     }
 

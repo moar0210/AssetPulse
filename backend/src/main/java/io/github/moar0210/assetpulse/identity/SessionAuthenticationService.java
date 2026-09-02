@@ -9,7 +9,7 @@ import java.util.Locale;
 import org.springframework.dao.DataAccessException;
 import org.springframework.security.authentication.AnonymousAuthenticationToken;
 import org.springframework.security.authentication.AuthenticationManager;
-import org.springframework.security.authentication.InternalAuthenticationServiceException;
+import org.springframework.security.authentication.AuthenticationServiceException;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.AuthenticationException;
@@ -28,6 +28,8 @@ public class SessionAuthenticationService {
     private final SecurityContextRepository securityContextRepository;
     private final SessionAuthenticationStrategy sessionAuthenticationStrategy;
     private final AuditService auditService;
+    private final LoginFailureLimiter loginFailureLimiter;
+    private final LoginClientAddressResolver clientAddressResolver;
     private final SecurityContextHolderStrategy securityContextHolderStrategy =
             SecurityContextHolder.getContextHolderStrategy();
 
@@ -35,11 +37,15 @@ public class SessionAuthenticationService {
             AuthenticationManager authenticationManager,
             SecurityContextRepository securityContextRepository,
             SessionAuthenticationStrategy sessionAuthenticationStrategy,
-            AuditService auditService) {
+            AuditService auditService,
+            LoginFailureLimiter loginFailureLimiter,
+            LoginClientAddressResolver clientAddressResolver) {
         this.authenticationManager = authenticationManager;
         this.securityContextRepository = securityContextRepository;
         this.sessionAuthenticationStrategy = sessionAuthenticationStrategy;
         this.auditService = auditService;
+        this.loginFailureLimiter = loginFailureLimiter;
+        this.clientAddressResolver = clientAddressResolver;
     }
 
     public AuthenticatedActor authenticate(
@@ -52,6 +58,11 @@ public class SessionAuthenticationService {
         }
 
         String email = loginRequest.email().strip().toLowerCase(Locale.ROOT);
+        String clientAddress = clientAddressResolver.resolve(request);
+        LoginFailureLimiter.Decision rateLimit = loginFailureLimiter.check(email, clientAddress);
+        if (rateLimit.blocked()) {
+            throw new LoginRateLimitExceededException(rateLimit.retryAfterSeconds());
+        }
         Authentication authentication;
 
         try {
@@ -59,7 +70,7 @@ public class SessionAuthenticationService {
                     authenticationManager.authenticate(
                             UsernamePasswordAuthenticationToken.unauthenticated(
                                     email, loginRequest.password()));
-        } catch (InternalAuthenticationServiceException exception) {
+        } catch (AuthenticationServiceException exception) {
             throw new AuthenticationUnavailableException();
         } catch (AuthenticationException exception) {
             try {
@@ -67,6 +78,7 @@ public class SessionAuthenticationService {
             } catch (DataAccessException | TransactionException auditFailure) {
                 throw new AuthenticationUnavailableException();
             }
+            loginFailureLimiter.recordFailure(email, clientAddress);
             throw new AuthenticationFailedException();
         }
 
@@ -74,6 +86,7 @@ public class SessionAuthenticationService {
             throw new IllegalStateException("Unexpected authenticated principal type");
         }
 
+        loginFailureLimiter.clear(email, clientAddress);
         sessionAuthenticationStrategy.onAuthentication(authentication, request, response);
 
         try {

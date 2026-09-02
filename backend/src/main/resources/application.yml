@@ -7,6 +7,29 @@ spring:
     deserialization:
       fail-on-unknown-properties: true
 
+logging:
+  structured:
+    format:
+      console: ${ASSETPULSE_LOG_FORMAT:ecs}
+    ecs:
+      service:
+        version: ${ASSETPULSE_BUILD_REVISION:development}
+    json:
+      stacktrace:
+        max-length: 8192
+        max-throwable-depth: 20
+
+management:
+  endpoints:
+    web:
+      exposure:
+        exclude: "*"
+  tracing:
+    propagation:
+      type: w3c
+    sampling:
+      probability: ${ASSETPULSE_TRACING_SAMPLING_PROBABILITY:1.0}
+
 server:
   servlet:
     session:
@@ -20,6 +43,18 @@ server:
         secure: ${ASSETPULSE_SESSION_COOKIE_SECURE:true}
 
 assetpulse:
+  observability:
+    metrics:
+      enabled: ${ASSETPULSE_OPERATIONAL_METRICS_ENABLED:true}
+      initial-delay-millis: ${ASSETPULSE_OPERATIONAL_METRICS_INITIAL_DELAY_MILLIS:15000}
+      report-delay-millis: ${ASSETPULSE_OPERATIONAL_METRICS_REPORT_DELAY_MILLIS:60000}
+    traces:
+      console-export-enabled: ${ASSETPULSE_TRACE_CONSOLE_EXPORT_ENABLED:true}
+  security:
+    login-rate-limit:
+      max-failures: ${ASSETPULSE_LOGIN_RATE_LIMIT_MAX_FAILURES:5}
+      window: ${ASSETPULSE_LOGIN_RATE_LIMIT_WINDOW:15m}
+      max-entries: ${ASSETPULSE_LOGIN_RATE_LIMIT_MAX_ENTRIES:10000}
   alerts:
     stream:
       timeout-millis: ${ASSETPULSE_ALERT_STREAM_TIMEOUT_MILLIS:1800000}

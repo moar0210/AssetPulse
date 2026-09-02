@@ -23,10 +23,14 @@ export BACKEND_UPSTREAM=127.0.0.1:8081
 export SERVER_ADDRESS=127.0.0.1
 export SERVER_PORT=8081
 
+if [ -z "${ASSETPULSE_BUILD_REVISION:-}" ]; then
+  export ASSETPULSE_BUILD_REVISION="${RENDER_GIT_COMMIT:-unknown}"
+fi
+
 envsubst '${FRONTEND_PORT} ${BACKEND_UPSTREAM}' \
   < /etc/nginx/templates/nginx.conf.template \
   > /tmp/nginx.conf
-nginx -t -c /tmp/nginx.conf
+nginx -t -c /tmp/nginx.conf -e stderr
 
 backend_pid=''
 frontend_pid=''
@@ -49,7 +53,7 @@ trap 'stop_processes; exit 143' TERM
 java -jar /app/app.jar &
 backend_pid=$!
 
-nginx -c /tmp/nginx.conf -g 'daemon off;' &
+nginx -c /tmp/nginx.conf -e stderr -g 'daemon off;' &
 frontend_pid=$!
 
 set +e

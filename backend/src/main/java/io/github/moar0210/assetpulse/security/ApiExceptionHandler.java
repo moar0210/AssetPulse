@@ -6,9 +6,13 @@ import io.github.moar0210.assetpulse.alerts.InvalidAlertQueryException;
 import io.github.moar0210.assetpulse.assets.AssetNotFoundException;
 import io.github.moar0210.assetpulse.audit.AuditUnavailableException;
 import io.github.moar0210.assetpulse.audit.InvalidAuditQueryException;
+import io.github.moar0210.assetpulse.dashboard.DashboardUnavailableException;
+import io.github.moar0210.assetpulse.demo.DemoResetLimitExceededException;
+import io.github.moar0210.assetpulse.demo.DemoResetUnavailableException;
 import io.github.moar0210.assetpulse.identity.AlreadyAuthenticatedException;
 import io.github.moar0210.assetpulse.identity.AuthenticationFailedException;
 import io.github.moar0210.assetpulse.identity.AuthenticationUnavailableException;
+import io.github.moar0210.assetpulse.identity.LoginRateLimitExceededException;
 import io.github.moar0210.assetpulse.telemetry.InvalidProcessingEventQueryException;
 import io.github.moar0210.assetpulse.telemetry.InvalidSensorReferenceException;
 import io.github.moar0210.assetpulse.telemetry.InvalidTelemetryRangeException;
@@ -26,6 +30,7 @@ import jakarta.servlet.http.HttpServletRequest;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import org.springframework.http.CacheControl;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ProblemDetail;
@@ -54,6 +59,22 @@ public class ApiExceptionHandler {
                 "AUTHENTICATION_FAILED",
                 "Authentication failed",
                 "The email or password is incorrect.");
+    }
+
+    @ExceptionHandler(LoginRateLimitExceededException.class)
+    ResponseEntity<ProblemDetail> loginRateLimited(
+            LoginRateLimitExceededException exception, HttpServletRequest request) {
+        return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS)
+                .header(HttpHeaders.RETRY_AFTER, Long.toString(exception.retryAfterSeconds()))
+                .cacheControl(CacheControl.noStore())
+                .contentType(MediaType.APPLICATION_PROBLEM_JSON)
+                .body(
+                        problemWriter.create(
+                                request,
+                                HttpStatus.TOO_MANY_REQUESTS.value(),
+                                "LOGIN_RATE_LIMITED",
+                                "Too many sign-in attempts",
+                                "Too many sign-in attempts. Try again later."));
     }
 
     @ExceptionHandler(AlreadyAuthenticatedException.class)
@@ -134,6 +155,36 @@ public class ApiExceptionHandler {
                 "INVALID_ALERT_QUERY",
                 "Invalid alert query",
                 "Provide a valid alert result limit from 1 to 100.");
+    }
+
+    @ExceptionHandler(DashboardUnavailableException.class)
+    ResponseEntity<ProblemDetail> dashboardUnavailable(HttpServletRequest request) {
+        return problem(
+                request,
+                HttpStatus.SERVICE_UNAVAILABLE,
+                "DASHBOARD_UNAVAILABLE",
+                "Dashboard unavailable",
+                "The dashboard is temporarily unavailable. Try again later.");
+    }
+
+    @ExceptionHandler(DemoResetLimitExceededException.class)
+    ResponseEntity<ProblemDetail> demoResetLimitExceeded(HttpServletRequest request) {
+        return problem(
+                request,
+                HttpStatus.CONFLICT,
+                "DEMO_RESET_LIMIT_EXCEEDED",
+                "Demo reset limit exceeded",
+                "The demo reset exceeds its safe per-request limit.");
+    }
+
+    @ExceptionHandler(DemoResetUnavailableException.class)
+    ResponseEntity<ProblemDetail> demoResetUnavailable(HttpServletRequest request) {
+        return problem(
+                request,
+                HttpStatus.SERVICE_UNAVAILABLE,
+                "DEMO_RESET_UNAVAILABLE",
+                "Demo reset unavailable",
+                "The demo could not be reset safely. Try again later.");
     }
 
     @ExceptionHandler(WorkOrderAlreadyExistsException.class)

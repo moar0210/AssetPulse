@@ -342,7 +342,7 @@ class TelemetryReadingRangeIntegrationTest {
     }
 
     @Test
-    void telemetryReadingMutationsRemainAbsent() throws Exception {
+    void telemetryReadingMutationsAreDeniedByDefault() throws Exception {
         MockHttpSession session = login("admin@northstar.example");
         CsrfExchange csrf = csrf(session);
         String path = telemetryPath(NORTHSTAR_SENSOR_ID);
@@ -354,7 +354,10 @@ class TelemetryReadingRangeIntegrationTest {
                                     .header(csrf.headerName(), csrf.token())
                                     .contentType(MediaType.APPLICATION_JSON)
                                     .content("{}"))
-                    .andExpect(status().isMethodNotAllowed());
+                    .andExpect(status().isForbidden())
+                    .andExpect(
+                            content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
+                    .andExpect(jsonPath("$.code").value("ACCESS_DENIED"));
         }
     }
 

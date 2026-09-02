@@ -34,6 +34,16 @@ export class AuthenticationFailedError extends Error {
   }
 }
 
+export class LoginRateLimitedError extends Error {
+  readonly retryAfterSeconds: number | null;
+
+  constructor(retryAfterSeconds: number | null) {
+    super("Login rate limited");
+    this.name = "LoginRateLimitedError";
+    this.retryAfterSeconds = retryAfterSeconds;
+  }
+}
+
 export class RequestVerificationFailedError extends Error {
   constructor() {
     super("Request verification failed");
@@ -42,6 +52,7 @@ export class RequestVerificationFailedError extends Error {
 }
 
 const JSON_MEDIA_TYPE = "application/json";
+const MAX_LOGIN_RETRY_AFTER_SECONDS = 24 * 60 * 60;
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const SLUG_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
@@ -117,6 +128,17 @@ function isSessionIdentity(value: unknown): value is SessionIdentity {
     isOrganisation(value.organisation) &&
     isRole(value.role)
   );
+}
+
+function readLoginRetryAfterSeconds(response: Response): number | null {
+  const retryAfter = response.headers.get("retry-after");
+
+  if (retryAfter === null || !/^[1-9]\d{0,4}$/.test(retryAfter)) {
+    return null;
+  }
+
+  const seconds = Number(retryAfter);
+  return seconds <= MAX_LOGIN_RETRY_AFTER_SECONDS ? seconds : null;
 }
 
 async function readJson(response: Response): Promise<unknown> {
@@ -201,6 +223,10 @@ export async function login(
 
   if (response.status === 401) {
     throw new AuthenticationFailedError();
+  }
+
+  if (response.status === 429) {
+    throw new LoginRateLimitedError(readLoginRetryAfterSeconds(response));
   }
 
   if (response.status === 403) {

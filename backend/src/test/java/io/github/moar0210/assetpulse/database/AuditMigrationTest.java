@@ -25,6 +25,8 @@ class AuditMigrationTest {
     private static final UUID RIVERSIDE_ID =
             UUID.fromString("00000000-0000-0000-0000-000000000002");
     private static final UUID ADMIN_ID = UUID.fromString("10000000-0000-0000-0000-000000000001");
+    private static final UUID NORTHSTAR_TECHNICIAN_ID =
+            UUID.fromString("10000000-0000-0000-0000-000000000002");
     private static final UUID RIVERSIDE_ADMIN_ID =
             UUID.fromString("10000000-0000-0000-0000-000000000004");
     private static final UUID NORTHSTAR_ALERT_ID =
@@ -45,7 +47,7 @@ class AuditMigrationTest {
             new PostgreSQLContainer<>(DockerImageName.parse("postgres:17.10-alpine"));
 
     @Test
-    void v14AddsConstrainedImmutableAuditStorageWithoutBackfill() {
+    void v14AndV15AddConstrainedImmutableAuditStorageWithoutBackfill() {
         DriverManagerDataSource dataSource =
                 new DriverManagerDataSource(
                         POSTGRESQL.getJdbcUrl(),
@@ -68,7 +70,7 @@ class AuditMigrationTest {
                 RIVERSIDE_WORK_ORDER_ID,
                 RIVERSIDE_PROCESSING_EVENT_ID);
         Map<String, List<String>> originalDomain = domainSnapshot(jdbcClient);
-        Flyway flyway = Flyway.configure().dataSource(dataSource).load();
+        Flyway flyway = Flyway.configure().dataSource(dataSource).target("15").load();
         flyway.migrate();
         assertThat(domainSnapshot(jdbcClient)).isEqualTo(originalDomain);
 
@@ -76,7 +78,8 @@ class AuditMigrationTest {
         insertAuthenticationSuccess(
                 jdbcClient, UUID.randomUUID(), NORTHSTAR_ID, ADMIN_ID, ADMIN_ID);
         insertAuthenticationFailure(jdbcClient, UUID.randomUUID());
-        assertThat(count(jdbcClient, "SELECT COUNT(*)::integer FROM audit_event")).isEqualTo(2);
+        insertDemoReset(jdbcClient, UUID.randomUUID(), NORTHSTAR_ID, ADMIN_ID, ADMIN_ID);
+        assertThat(count(jdbcClient, "SELECT COUNT(*)::integer FROM audit_event")).isEqualTo(3);
         assertThat(
                         count(
                                 jdbcClient,
@@ -136,7 +139,7 @@ class AuditMigrationTest {
             insertAuditShape(jdbcClient, shape);
         }
         List<String> expectedAudit = snapshot(jdbcClient, "audit_event");
-        assertThat(expectedAudit).hasSize(8);
+        assertThat(expectedAudit).hasSize(9);
 
         assertForeignSubjectRejected(
                 jdbcClient,
@@ -265,6 +268,22 @@ class AuditMigrationTest {
                                 NORTHSTAR_WORK_ORDER_ID,
                                 null),
                         new AuditShape(
+                                "DEMO_RESET",
+                                NORTHSTAR_ID,
+                                ADMIN_ID,
+                                NORTHSTAR_TECHNICIAN_ID,
+                                null,
+                                null,
+                                null),
+                        new AuditShape(
+                                "DEMO_RESET",
+                                NORTHSTAR_ID,
+                                ADMIN_ID,
+                                null,
+                                NORTHSTAR_ALERT_ID,
+                                null,
+                                null),
+                        new AuditShape(
                                 "ALERT_ACKNOWLEDGED",
                                 NORTHSTAR_ID,
                                 ADMIN_ID,
@@ -335,6 +354,11 @@ class AuditMigrationTest {
                                 jdbcClient,
                                 "SELECT COUNT(*)::integer FROM flyway_schema_history WHERE success AND version = '14'"))
                 .isOne();
+        assertThat(
+                        count(
+                                jdbcClient,
+                                "SELECT COUNT(*)::integer FROM flyway_schema_history WHERE success AND version = '15'"))
+                .isOne();
 
         flyway.migrate();
         assertThat(snapshot(jdbcClient, "audit_event")).isEqualTo(expectedAudit);
@@ -343,6 +367,11 @@ class AuditMigrationTest {
                         count(
                                 jdbcClient,
                                 "SELECT COUNT(*)::integer FROM flyway_schema_history WHERE success AND version = '14'"))
+                .isOne();
+        assertThat(
+                        count(
+                                jdbcClient,
+                                "SELECT COUNT(*)::integer FROM flyway_schema_history WHERE success AND version = '15'"))
                 .isOne();
     }
 
@@ -497,6 +526,30 @@ class AuditMigrationTest {
                 VALUES (:id, 'AUTHENTICATION_FAILED', :correlationId)
                 """)
                 .param("id", id)
+                .param("correlationId", UUID.randomUUID())
+                .update();
+    }
+
+    private static void insertDemoReset(
+            JdbcClient jdbcClient,
+            UUID id,
+            UUID organisationId,
+            UUID actorUserId,
+            UUID subjectUserId) {
+        jdbcClient
+                .sql(
+                        """
+                INSERT INTO audit_event (
+                    id, organisation_id, actor_user_id, action, subject_user_id, correlation_id
+                ) VALUES (
+                    :id, :organisationId, :actorUserId,
+                    'DEMO_RESET', :subjectUserId, :correlationId
+                )
+                """)
+                .param("id", id)
+                .param("organisationId", organisationId)
+                .param("actorUserId", actorUserId)
+                .param("subjectUserId", subjectUserId)
                 .param("correlationId", UUID.randomUUID())
                 .update();
     }
