@@ -10,6 +10,11 @@ capacity test. The script refuses more than 1 virtual user, 20 total iterations,
 Install k6 locally, create an output directory if you choose a nested summary path,
 and keep credentials in environment variables rather than command arguments:
 
+The verification workflow checks script initialization in checksum-verified k6
+1.7.1. Origin parsing is local and does not require browser globals or remote
+JavaScript imports. Use a DNS hostname, a canonical IPv4 address, or an IPv6
+literal; credentials, query strings, fragments, and non-root paths are rejected.
+
 ```bash
 export ASSETPULSE_BASE_URL="https://example.onrender.com"
 export ASSETPULSE_K6_PASSWORD="<demo-operations-admin-password>"
@@ -42,6 +47,9 @@ relative `ASSETPULSE_K6_SUMMARY_PATH` to change it. The parent directory must al
 exist.
 
 ## Evidence and interpretation
+
+The iteration threshold requires every requested iteration to finish, so a run
+interrupted by the three-minute deadline cannot pass on a partial sample.
 
 The JSON report records the target origin, environment label, deployment revision,
 bounded configuration, k6 state, thresholds, HTTP failure rate, request duration,

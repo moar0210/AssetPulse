@@ -111,7 +111,22 @@ jobs:
 
       - name: Test bounded k6 alert evidence
         working-directory: .
-        run: node --test infra/performance/alert-evidence.test.mjs
+        run: node --test infra/performance/alert-evidence.test.mjs infra/performance/origin.test.mjs
+
+      - name: Verify scenario initialization in k6 1.7.1
+        working-directory: .
+        shell: bash
+        run: |
+          archive="$RUNNER_TEMP/k6-v1.7.1-linux-amd64.tar.gz"
+          curl --fail --silent --show-error --location \
+            https://github.com/grafana/k6/releases/download/v1.7.1/k6-v1.7.1-linux-amd64.tar.gz \
+            --output "$archive"
+          printf '%s  %s\n' 'cc127a656f734f8ea1e89f8a417777905ae6a93d42f3e763e95313518180655b' "$archive" | sha256sum --check
+          tar --extract --gzip --file "$archive" --directory "$RUNNER_TEMP"
+          "$RUNNER_TEMP/k6-v1.7.1-linux-amd64/k6" inspect \
+            --env ASSETPULSE_BASE_URL=https://example.onrender.com \
+            --env ASSETPULSE_K6_PASSWORD=ci-runtime-validation \
+            infra/performance/telemetry-to-alert.k6.js
 
   containers:
     name: Containers
@@ -155,6 +170,8 @@ jobs:
 
       - name: Scan filesystem dependencies for critical vulnerabilities
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          TRIVY_INCLUDE_DEV_DEPS: "true"
         with:
           scan-type: fs
           scan-ref: .
@@ -398,6 +415,32 @@ jobs:
 
       - name: Verify local same-origin behavior
         run: node infra/smoke/public-smoke.mjs --base-url http://127.0.0.1:8080 --allow-http
+
+      - name: Install browser journey dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Install Chromium and its system dependencies
+        working-directory: frontend
+        run: npx playwright install --with-deps chromium
+
+      - name: Verify product journeys and accessibility
+        working-directory: frontend
+        env:
+          ASSETPULSE_BASE_URL: http://127.0.0.1:8080
+          ASSETPULSE_EXPECT_SECURITY_HEADERS: "true"
+        run: npm run test:e2e
+
+      - name: Retain browser failure evidence
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: browser-failure-evidence
+          path: |
+            frontend/playwright-report/
+            frontend/test-results/
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Start zero-cost hosting image
         shell: bash

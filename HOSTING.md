@@ -34,7 +34,7 @@ The repository prepares this topology but does not create external resources. `r
 
 ## Current free-tier constraints
 
-Terms were checked on 2026-08-31 and must be checked again immediately before resource creation.
+Terms were checked on 2026-09-05 and must be checked again immediately before resource creation.
 
 | Service | Current free boundary | Consequence for this project |
 | --- | --- | --- |
@@ -45,6 +45,9 @@ Terms were checked on 2026-08-31 and must be checked again immediately before re
 Render's free PostgreSQL offer is not used because its database expires after 30 days. AssetPulse also makes no uptime, high-availability, production-scale, or zero-cold-start claim.
 
 ## Deployment contract for v0.7
+
+The [operations runbook](infra/operations/RUNBOOK.md) gives the deployment,
+evidence-capture, incident, and rollback procedure.
 
 Before `v0.7` can close:
 

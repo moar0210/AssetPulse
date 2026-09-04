@@ -2,6 +2,7 @@ services:
   - type: web
     name: assetpulse
     runtime: docker
+    branch: main
     plan: free
     region: frankfurt
     autoDeployTrigger: checksPass

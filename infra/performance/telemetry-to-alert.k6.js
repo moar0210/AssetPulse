@@ -8,6 +8,7 @@ import {
   evidenceWindowFollowsBaseline,
   hasCausalAlertAdvance,
 } from "./alert-evidence.mjs";
+import { normalizePerformanceOrigin } from "./origin.mjs";
 
 const JSON_MEDIA_TYPE = "application/json";
 const SENSOR_ID = "30000000-0000-0000-0000-000000000001";
@@ -78,38 +79,9 @@ function nonEmptyEnvironment(name, defaultValue) {
 
 function normalizedBaseUrl() {
   const rawValue = nonEmptyEnvironment("ASSETPULSE_BASE_URL");
-  let parsed;
-  try {
-    parsed = new URL(rawValue);
-  } catch {
-    throw new Error("ASSETPULSE_BASE_URL must be an absolute origin");
-  }
-
-  const allowHttp = booleanEnvironment("ASSETPULSE_K6_ALLOW_HTTP");
-  if (
-    parsed.username !== "" ||
-    parsed.password !== "" ||
-    parsed.search !== "" ||
-    parsed.hash !== "" ||
-    (parsed.pathname !== "" && parsed.pathname !== "/") ||
-    (parsed.protocol !== "https:" &&
-      !(allowHttp && parsed.protocol === "http:"))
-  ) {
-    throw new Error(
-      "ASSETPULSE_BASE_URL must be a credential-free HTTPS origin (HTTP is local-only)",
-    );
-  }
-
-  if (
-    allowHttp &&
-    !["localhost", "127.0.0.1", "::1", "[::1]"].includes(parsed.hostname)
-  ) {
-    throw new Error(
-      "ASSETPULSE_K6_ALLOW_HTTP may only be used with a loopback origin",
-    );
-  }
-
-  return parsed.origin;
+  return normalizePerformanceOrigin(rawValue, {
+    allowHttp: booleanEnvironment("ASSETPULSE_K6_ALLOW_HTTP"),
+  });
 }
 
 function safeOptionalEnvironment(name, pattern, maximumLength) {
@@ -188,6 +160,7 @@ export const options = {
     },
   },
   thresholds: {
+    iterations: [`count==${ITERATIONS}`],
     assetpulse_scenario_success: ["rate==1"],
     assetpulse_telemetry_accept_latency: ["p(95)<5000"],
     assetpulse_telemetry_to_alert_latency: ["p(95)<30000"],
@@ -407,7 +380,7 @@ export function handleSummary(data) {
     environment: {
       name: ENVIRONMENT_NAME,
       deployRevision: DEPLOY_REVISION,
-      protocol: new URL(BASE_URL).protocol,
+      protocol: BASE_URL.slice(0, BASE_URL.indexOf(":")) + ":",
     },
     boundedConfiguration: {
       vus: VUS,
