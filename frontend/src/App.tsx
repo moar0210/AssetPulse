@@ -68,6 +68,7 @@ type AssetDetailState =
   | Readonly<{ kind: "unavailable" }>;
 
 const API_TIMEOUT_MS = 5_000;
+const LOGIN_TIMEOUT_MS = 30_000;
 
 type DiscoveredSession = Readonly<{
   csrfToken: CsrfToken;
@@ -76,9 +77,10 @@ type DiscoveredSession = Readonly<{
 
 async function withApiTimeout<T>(
   operation: (signal: AbortSignal) => Promise<T>,
+  timeoutMs = API_TIMEOUT_MS,
 ): Promise<T> {
   const controller = new AbortController();
-  const timeoutId = window.setTimeout(() => controller.abort(), API_TIMEOUT_MS);
+  const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
 
   try {
     return await operation(controller.signal);
@@ -963,8 +965,9 @@ function App() {
     csrfToken: CsrfToken,
   ): Promise<LoginOutcome> {
     try {
-      const authenticatedSession = await withApiTimeout((signal) =>
-        createSessionWithRecovery(request, csrfToken, signal),
+      const authenticatedSession = await withApiTimeout(
+        (signal) => createSessionWithRecovery(request, csrfToken, signal),
+        LOGIN_TIMEOUT_MS,
       );
       setApplicationState({
         kind: "authenticated",

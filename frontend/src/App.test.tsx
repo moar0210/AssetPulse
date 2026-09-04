@@ -1086,8 +1086,61 @@ describe("seeded session application", () => {
     expect(screen.queryByText("Welcome, Nora Admin")).toBeNull();
   });
 
-  it("bounds a stalled login attempt", async () => {
-    installFetch(async (url, init) => {
+  it("keeps a slow verified login pending and confirms identity without replay", async () => {
+    let authenticated = false;
+    let loginSignal: AbortSignal | null | undefined;
+    const fetchMock = installFetch(async (url, init) => {
+      if (url === "/api/v1/status") return statusResponse();
+      if (url === "/api/v1/session/csrf") return jsonResponse(csrfToken);
+      if (init?.method === "POST") {
+        loginSignal = init.signal;
+        return new Promise<Response>((resolve, reject) => {
+          setTimeout(() => {
+            authenticated = true;
+            resolve(jsonResponse(identity));
+          }, 8_000);
+          init.signal?.addEventListener(
+            "abort",
+            () => reject(new DOMException("Aborted", "AbortError")),
+            { once: true },
+          );
+        });
+      }
+      return authenticated ? jsonResponse(identity) : jsonResponse({}, 401);
+    });
+    render(<App />);
+    await screen.findByRole("button", { name: "Sign in" });
+    fireEvent.change(screen.getByLabelText("Email"), {
+      target: { value: "admin@northstar.example" },
+    });
+    fireEvent.change(screen.getByLabelText("Password"), {
+      target: { value: "AssetPulse1!" },
+    });
+
+    vi.useFakeTimers();
+    try {
+      fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+      await act(async () => vi.advanceTimersByTimeAsync(5_000));
+      expect(
+        screen.getByRole("button", { name: "Signing in…" }),
+      ).toBeDisabled();
+      expect(loginSignal?.aborted).toBe(false);
+      expect(screen.queryByText("Welcome, Nora Admin")).toBeNull();
+      await act(async () => vi.advanceTimersByTimeAsync(3_000));
+      expect(
+        screen.getByRole("heading", { name: "Welcome, Nora Admin" }),
+      ).toBeVisible();
+      expect(
+        fetchMock.mock.calls.filter(([, init]) => init?.method === "POST"),
+      ).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("bounds a stalled login and rediscovers a completed session without replay", async () => {
+    let authenticated = false;
+    const fetchMock = installFetch(async (url, init) => {
       if (url === "/api/v1/status") {
         return statusResponse();
       }
@@ -1107,7 +1160,7 @@ describe("seeded session application", () => {
           );
         });
       }
-      return jsonResponse({}, 401);
+      return authenticated ? jsonResponse(identity) : jsonResponse({}, 401);
     });
 
     render(<App />);
@@ -1120,13 +1173,29 @@ describe("seeded session application", () => {
     });
 
     vi.useFakeTimers();
-    fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
-    await act(async () => vi.advanceTimersByTimeAsync(5_000));
-    vi.useRealTimers();
+    try {
+      fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+      await act(async () => vi.advanceTimersByTimeAsync(29_999));
+      expect(
+        screen.getByRole("button", { name: "Signing in…" }),
+      ).toBeDisabled();
+      await act(async () => vi.advanceTimersByTimeAsync(1));
+    } finally {
+      vi.useRealTimers();
+    }
 
     expect(screen.getByRole("alert")).toHaveTextContent(
       "could not load your session",
     );
+    expect(screen.queryByText("Welcome, Nora Admin")).toBeNull();
+    authenticated = true;
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(
+      await screen.findByRole("heading", { name: "Welcome, Nora Admin" }),
+    ).toBeVisible();
+    expect(
+      fetchMock.mock.calls.filter(([, init]) => init?.method === "POST"),
+    ).toHaveLength(1);
   });
 
   it("shows an unavailable state and recovers on retry", async () => {
