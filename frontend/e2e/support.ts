@@ -1,7 +1,6 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect } from "@playwright/test";
 import type {
-  APIResponse,
   Browser,
   BrowserContext,
   Locator,
@@ -52,12 +51,117 @@ export type DemoResetResult = Readonly<{
   workOrdersCompleted: number;
 }>;
 
+export type BrowserApiResponse = Readonly<{
+  status(): number;
+  headers(): Record<string, string>;
+  json(): Promise<unknown>;
+  url(): string;
+}>;
+
+export async function browserApiRequest(
+  page: Page,
+  method: "GET" | "POST",
+  path: string,
+  options: Readonly<{
+    headers?: Readonly<Record<string, string>>;
+    data?: unknown;
+  }> = {},
+): Promise<BrowserApiResponse> {
+  const result = await page.evaluate(
+    async ({ method, path, headers, data }) => {
+      const request: RequestInit = {
+        method,
+        credentials: "same-origin",
+        headers,
+      };
+      if (data !== undefined) request.body = JSON.stringify(data);
+      const response = await fetch(path, request);
+      return {
+        status: response.status,
+        headers: Object.fromEntries(response.headers.entries()),
+        body: await response.json(),
+        url: response.url,
+      };
+    },
+    { method, path, headers: options.headers, data: options.data },
+  );
+  if (result.status >= 400) {
+    const failures = expectedBrowserHttpFailures.get(page) ?? new Set<string>();
+    failures.add(`${result.status}|${result.url}`);
+    expectedBrowserHttpFailures.set(page, failures);
+  }
+  return {
+    status: () => result.status,
+    headers: () => result.headers,
+    json: async () => result.body,
+    url: () => result.url,
+  };
+}
+
 const SECURITY_HEADERS = {
   "referrer-policy": "no-referrer",
   "permissions-policy": "camera=(), geolocation=(), microphone=()",
   "x-content-type-options": "nosniff",
   "x-frame-options": "DENY",
 } as const;
+
+type BrowserDiagnostic = Readonly<{
+  type: string;
+  text: string;
+  url: string;
+}>;
+const browserDiagnostics = new WeakMap<Page, BrowserDiagnostic[]>();
+const expectedBrowserHttpFailures = new WeakMap<Page, Set<string>>();
+
+export function monitorBrowser(page: Page): void {
+  if (browserDiagnostics.has(page)) return;
+  const diagnostics: BrowserDiagnostic[] = [];
+  browserDiagnostics.set(page, diagnostics);
+  page.on("console", (message) => {
+    if (message.type() === "warning" || message.type() === "error") {
+      diagnostics.push({
+        type: message.type(),
+        text: message.text(),
+        url: message.location().url,
+      });
+    }
+  });
+  page.on("pageerror", (error) => {
+    diagnostics.push({ type: "pageerror", text: error.message, url: "" });
+  });
+}
+
+export function expectCleanBrowser(
+  page: Page,
+  expectedConflictPath?: string,
+): void {
+  const diagnostics = browserDiagnostics.get(page);
+  expect(diagnostics, "Browser diagnostics must be monitored").toBeDefined();
+  const unexpected = diagnostics!.filter((diagnostic) => {
+    if (diagnostic.type !== "error" || diagnostic.url === "") return true;
+    const path = new URL(diagnostic.url).pathname;
+    // Chromium also reports expected anonymous discovery and the verified conflict as resource errors.
+    const anonymousDiscovery =
+      path === "/api/v1/session" &&
+      /^Failed to load resource: the server responded with a status of 401 \((?:Unauthorized)?\)$/.test(
+        diagnostic.text,
+      );
+    const rejectedConflict =
+      expectedConflictPath !== undefined &&
+      path === expectedConflictPath &&
+      /^Failed to load resource: the server responded with a status of 409 \((?:Conflict)?\)$/.test(
+        diagnostic.text,
+      );
+    const statusMatch = /status of ([0-9]{3}) \(/.exec(diagnostic.text);
+    const verifiedDirectProbe =
+      statusMatch !== null &&
+      expectedBrowserHttpFailures
+        .get(page)
+        ?.has(`${statusMatch[1]}|${diagnostic.url}`) === true;
+    return !anonymousDiscovery && !rejectedConflict && !verifiedDirectProbe;
+  });
+  expect(unexpected, "Unexpected browser warnings or errors").toEqual([]);
+}
 
 function requireBaseURL(baseURL: string | undefined): string {
   if (baseURL === undefined || baseURL.trim() === "") {
@@ -75,7 +179,9 @@ export async function newIsolatedPage(
     locale: "en-US",
     timezoneId: "UTC",
   });
-  return { context, page: await context.newPage() };
+  const page = await context.newPage();
+  monitorBrowser(page);
+  return { context, page };
 }
 
 export async function openAndSignIn(
@@ -102,7 +208,7 @@ export async function openAndSignIn(
       level: 1,
       name: `Welcome, ${account.displayName}`,
     }),
-  ).toBeVisible();
+  ).toBeVisible({ timeout: 35_000 });
   await expect(
     page.getByText(account.organisation, { exact: true }),
   ).toBeVisible();
@@ -138,20 +244,43 @@ export async function expectNoSeriousAccessibilityViolations(
   page: Page,
   surface: string,
 ): Promise<void> {
-  const results = await new AxeBuilder({ page }).analyze();
-  const blockingViolations = results.violations
-    .filter(({ impact }) => impact === "critical" || impact === "serious")
-    .map(({ id, impact, help, nodes }) => ({
-      id,
-      impact,
-      help,
-      targets: nodes.map(({ target }) => target),
-    }));
-
-  expect(
-    blockingViolations,
-    `${surface} has serious or critical accessibility violations`,
-  ).toEqual([]);
+  const originalViewport = page.viewportSize();
+  try {
+    for (const viewport of [
+      { width: 1280, height: 900 },
+      { width: 390, height: 844 },
+    ]) {
+      await page.setViewportSize(viewport);
+      await expect
+        .poll(
+          () =>
+            page.evaluate(
+              () =>
+                Math.max(
+                  document.documentElement.scrollWidth,
+                  document.body.scrollWidth,
+                ) - document.documentElement.clientWidth,
+            ),
+          { message: `${surface} overflows at ${viewport.width}px` },
+        )
+        .toBeLessThanOrEqual(1);
+      const results = await new AxeBuilder({ page }).analyze();
+      const blockingViolations = results.violations
+        .filter(({ impact }) => impact === "critical" || impact === "serious")
+        .map(({ id, impact, help, nodes }) => ({
+          id,
+          impact,
+          help,
+          targets: nodes.map(({ target }) => target),
+        }));
+      expect(
+        blockingViolations,
+        `${surface} has serious or critical accessibility violations at ${viewport.width}px`,
+      ).toEqual([]);
+    }
+  } finally {
+    if (originalViewport !== null) await page.setViewportSize(originalViewport);
+  }
 }
 
 export function expectDocumentSecurityHeaders(response: Response | null): void {
@@ -182,9 +311,14 @@ export function expectDocumentSecurityHeaders(response: Response | null): void {
 }
 
 export async function getCsrfToken(page: Page): Promise<CsrfToken> {
-  const response = await page.request.get("/api/v1/session/csrf", {
-    headers: { Accept: "application/json" },
-  });
+  const response = await browserApiRequest(
+    page,
+    "GET",
+    "/api/v1/session/csrf",
+    {
+      headers: { Accept: "application/json" },
+    },
+  );
   expect(response.status()).toBe(200);
   const payload: unknown = await response.json();
   expect(payload).toEqual({
@@ -205,12 +339,17 @@ export async function resetDemoThroughApi(
   try {
     await openAndSignIn(page, seededAccounts.northstarAdmin);
     const csrfToken = await getCsrfToken(page);
-    const response = await page.request.post("/api/v1/demo/reset", {
-      headers: {
-        Accept: "application/json",
-        [csrfToken.headerName]: csrfToken.token,
+    const response = await browserApiRequest(
+      page,
+      "POST",
+      "/api/v1/demo/reset",
+      {
+        headers: {
+          Accept: "application/json",
+          [csrfToken.headerName]: csrfToken.token,
+        },
       },
-    });
+    );
     expect(response.status()).toBe(200);
     const payload: unknown = await response.json();
     expect(payload).toEqual({
@@ -225,7 +364,11 @@ export async function resetDemoThroughApi(
     expect(result.workOrdersCompleted).toBeGreaterThanOrEqual(0);
     return result;
   } finally {
-    await context.close();
+    try {
+      expectCleanBrowser(page);
+    } finally {
+      await context.close();
+    }
   }
 }
 
@@ -244,10 +387,53 @@ export function responseMatches(
 }
 
 export async function expectApiStatus(
-  response: APIResponse,
+  response: BrowserApiResponse,
   status: number,
 ): Promise<void> {
   expect(response.status()).toBe(status);
+}
+
+export async function expectApiProblem(
+  response: BrowserApiResponse,
+  code:
+    | "ACCESS_DENIED"
+    | "ALERT_NOT_FOUND"
+    | "WORK_ORDER_NOT_FOUND"
+    | "ASSET_NOT_FOUND",
+): Promise<void> {
+  const contracts = {
+    ACCESS_DENIED: {
+      status: 403,
+      title: "Access denied",
+      detail: "The authenticated user cannot access this resource.",
+    },
+    ALERT_NOT_FOUND: {
+      status: 404,
+      title: "Alert not found",
+      detail: "The requested alert does not exist or is not accessible.",
+    },
+    WORK_ORDER_NOT_FOUND: {
+      status: 404,
+      title: "Work order not found",
+      detail: "The requested work order does not exist or is not accessible.",
+    },
+    ASSET_NOT_FOUND: {
+      status: 404,
+      title: "Asset not found",
+      detail: "The requested asset does not exist or is not accessible.",
+    },
+  } as const;
+  expect(response.status()).toBe(contracts[code].status);
+  expect(response.headers()["content-type"]).toContain(
+    "application/problem+json",
+  );
+  expect(await response.json()).toEqual({
+    ...contracts[code],
+    type: `urn:assetpulse:problem:${code.toLowerCase().replaceAll("_", "-")}`,
+    instance: new URL(response.url()).pathname,
+    code,
+    correlationId: expect.stringMatching(/^[0-9a-f-]{36}$/i),
+  });
 }
 
 export async function readJsonRecord(

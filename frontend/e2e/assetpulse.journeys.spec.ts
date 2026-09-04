@@ -3,10 +3,14 @@ import type { Page, Response } from "@playwright/test";
 
 import {
   activateWithKeyboard,
+  browserApiRequest,
+  expectApiProblem,
   expectApiStatus,
+  expectCleanBrowser,
   expectDocumentSecurityHeaders,
   expectNoSeriousAccessibilityViolations,
   getCsrfToken,
+  monitorBrowser,
   newIsolatedPage,
   openAndSignIn,
   openProductSection,
@@ -78,8 +82,11 @@ async function openCurrentWorkOrder(
   ).toBeFocused();
 }
 
-test.describe("AssetPulse v0.6 local journeys", () => {
+test.describe("AssetPulse v0.6 product journeys", () => {
   test.describe.configure({ mode: "serial" });
+
+  test.beforeEach(({ page }) => monitorBrowser(page));
+  test.afterEach(({ page }) => expectCleanBrowser(page));
 
   test.afterAll(async ({ browser, baseURL }) => {
     if (!cleanupComplete) {
@@ -89,6 +96,8 @@ test.describe("AssetPulse v0.6 local journeys", () => {
 
   test("live incident: reset, telemetry, alert, and assigned work remain keyboard accessible", async ({
     page,
+    browser,
+    baseURL,
   }) => {
     const loginDocument = await page.goto("/", {
       waitUntil: "domcontentloaded",
@@ -123,21 +132,53 @@ test.describe("AssetPulse v0.6 local journeys", () => {
     await expect(resetFeedback).toBeVisible();
     await expect(resetFeedback).toBeFocused();
 
-    const scenarioResponsePromise = page.waitForResponse((response) =>
-      responseMatches(response, "POST", "/api/v1/telemetry-batches"),
-    );
-    await activateWithKeyboard(
-      page.getByRole("button", { name: "Launch and open alerts" }),
-      "Space",
-    );
-    const scenarioResponse = await scenarioResponsePromise;
-    expect(scenarioResponse.status()).toBe(200);
-    const scenarioPayload = await readJsonRecord(scenarioResponse);
-    expect(scenarioPayload.readingCount).toBe(6);
-    expectUuid(scenarioPayload.batchId, "accepted telemetry batch ID");
-    await expect(
-      page.getByRole("button", { name: "Alerts", exact: true }),
-    ).toHaveAttribute("aria-current", "page");
+    const observer = await newIsolatedPage(browser, baseURL);
+    let submittedReadings: readonly { value: number; observedAt: string }[] =
+      [];
+    try {
+      await openAndSignIn(observer.page, seededAccounts.northstarViewer);
+      await openProductSection(observer.page, "Alerts");
+      await expect(
+        observer.page.getByText("Live updates connected", { exact: true }),
+      ).toBeVisible();
+      await expect(
+        observer.page.getByRole("button", {
+          name: ALERT_ROW_NAMES.open,
+          exact: true,
+        }),
+      ).toHaveCount(0);
+
+      const scenarioResponsePromise = page.waitForResponse((response) =>
+        responseMatches(response, "POST", "/api/v1/telemetry-batches"),
+      );
+      await activateWithKeyboard(
+        page.getByRole("button", { name: "Launch and open alerts" }),
+        "Space",
+      );
+      const scenarioResponse = await scenarioResponsePromise;
+      expect(scenarioResponse.status()).toBe(200);
+      const scenarioPayload = await readJsonRecord(scenarioResponse);
+      expect(scenarioPayload.readingCount).toBe(6);
+      expectUuid(scenarioPayload.batchId, "accepted telemetry batch ID");
+      submittedReadings = scenarioResponse.request().postDataJSON().readings;
+      expect(submittedReadings).toHaveLength(6);
+      await expect(
+        page.getByRole("button", { name: "Alerts", exact: true }),
+      ).toHaveAttribute("aria-current", "page");
+      // The already-open observer receives the incident with no navigation or refresh.
+      await expect(
+        observer.page.getByRole("button", {
+          name: ALERT_ROW_NAMES.open,
+          exact: true,
+        }),
+      ).toBeVisible({ timeout: 30_000 });
+    } finally {
+      try {
+        expectCleanBrowser(observer.page);
+      } finally {
+        await observer.context.close();
+      }
+    }
 
     await openProductSection(page, "Assets", "Space");
     await activateWithKeyboard(
@@ -157,7 +198,32 @@ test.describe("AssetPulse v0.6 local journeys", () => {
         name: /Recent readings for Bearing Temperature/i,
       }),
     ).toBeVisible();
-    expect(await telemetryTable.locator("tbody tr").count()).toBeGreaterThan(0);
+    const displayedReadings = await telemetryTable
+      .locator("tbody tr")
+      .evaluateAll((rows) =>
+        rows.map((row) => ({
+          observedAt: row.querySelector("time")!.getAttribute("datetime")!,
+          value: Number(row.querySelector("data")!.getAttribute("value")),
+        })),
+      );
+    expect(displayedReadings.length).toBeGreaterThanOrEqual(6);
+    const readingTimes = displayedReadings.map(({ observedAt }) =>
+      Date.parse(observedAt),
+    );
+    expect(readingTimes.every(Number.isFinite)).toBe(true);
+    expect(readingTimes).toEqual(
+      [...readingTimes].sort((first, second) => first - second),
+    );
+    for (const reading of submittedReadings) {
+      expect(
+        displayedReadings.some(
+          (displayed) =>
+            Date.parse(displayed.observedAt) ===
+              Date.parse(reading.observedAt) &&
+            displayed.value === reading.value,
+        ),
+      ).toBe(true);
+    }
     const telemetryRegion = page.getByRole("region", {
       name: "Recent readings for Bearing Temperature",
     });
@@ -314,7 +380,9 @@ test.describe("AssetPulse v0.6 local journeys", () => {
       );
 
       const viewerCsrf = await getCsrfToken(viewer.page);
-      const forbiddenStart = await viewer.page.request.post(
+      const forbiddenStart = await browserApiRequest(
+        viewer.page,
+        "POST",
         `/api/v1/work-orders/${workOrderId}/start`,
         {
           headers: {
@@ -325,8 +393,10 @@ test.describe("AssetPulse v0.6 local journeys", () => {
           data: { expectedVersion: 1 },
         },
       );
-      await expectApiStatus(forbiddenStart, 403);
-      const forbiddenReset = await viewer.page.request.post(
+      await expectApiProblem(forbiddenStart, "ACCESS_DENIED");
+      const forbiddenReset = await browserApiRequest(
+        viewer.page,
+        "POST",
         "/api/v1/demo/reset",
         {
           headers: {
@@ -335,9 +405,19 @@ test.describe("AssetPulse v0.6 local journeys", () => {
           },
         },
       );
-      await expectApiStatus(forbiddenReset, 403);
+      await expectApiProblem(forbiddenReset, "ACCESS_DENIED");
 
-      const spoofedNorthstarAssets = await viewer.page.request.get(
+      const foreignAsset = await browserApiRequest(
+        viewer.page,
+        "GET",
+        "/api/v1/assets/20000000-0000-0000-0000-000000000003",
+        { headers: { Accept: "application/json" } },
+      );
+      await expectApiProblem(foreignAsset, "ASSET_NOT_FOUND");
+
+      const spoofedNorthstarAssets = await browserApiRequest(
+        viewer.page,
+        "GET",
         "/api/v1/assets",
         {
           headers: {
@@ -353,7 +433,11 @@ test.describe("AssetPulse v0.6 local journeys", () => {
         "Cooling Water Pump",
       ]);
     } finally {
-      await viewer.context.close();
+      try {
+        expectCleanBrowser(viewer.page);
+      } finally {
+        await viewer.context.close();
+      }
     }
 
     const technician = await newIsolatedPage(browser, baseURL);
@@ -380,7 +464,11 @@ test.describe("AssetPulse v0.6 local journeys", () => {
         "technician-owned work-order detail",
       );
     } finally {
-      await technician.context.close();
+      try {
+        expectCleanBrowser(technician.page);
+      } finally {
+        await technician.context.close();
+      }
     }
 
     const riverside = await newIsolatedPage(browser, baseURL);
@@ -403,17 +491,23 @@ test.describe("AssetPulse v0.6 local journeys", () => {
         "Riverside asset list",
       );
 
-      const hiddenAlert = await riverside.page.request.get(
+      const hiddenAlert = await browserApiRequest(
+        riverside.page,
+        "GET",
         `/api/v1/alerts/${alertId}`,
         { headers: { Accept: "application/json" } },
       );
-      await expectApiStatus(hiddenAlert, 404);
-      const hiddenWorkOrder = await riverside.page.request.get(
+      await expectApiProblem(hiddenAlert, "ALERT_NOT_FOUND");
+      const hiddenWorkOrder = await browserApiRequest(
+        riverside.page,
+        "GET",
         `/api/v1/work-orders/${workOrderId}`,
         { headers: { Accept: "application/json" } },
       );
-      await expectApiStatus(hiddenWorkOrder, 404);
-      const spoofedRiversideAssets = await riverside.page.request.get(
+      await expectApiProblem(hiddenWorkOrder, "WORK_ORDER_NOT_FOUND");
+      const spoofedRiversideAssets = await browserApiRequest(
+        riverside.page,
+        "GET",
         "/api/v1/assets",
         {
           headers: {
@@ -428,7 +522,11 @@ test.describe("AssetPulse v0.6 local journeys", () => {
         "Process Pump",
       ]);
     } finally {
-      await riverside.context.close();
+      try {
+        expectCleanBrowser(riverside.page);
+      } finally {
+        await riverside.context.close();
+      }
     }
   });
 
@@ -438,6 +536,8 @@ test.describe("AssetPulse v0.6 local journeys", () => {
   }) => {
     const firstClient = await newIsolatedPage(browser, baseURL);
     const secondClient = await newIsolatedPage(browser, baseURL);
+    let conflictClient: Page | undefined;
+    const startPath = `/api/v1/work-orders/${workOrderId}/start`;
     try {
       await Promise.all([
         openAndSignIn(firstClient.page, seededAccounts.northstarTechnician),
@@ -452,7 +552,6 @@ test.describe("AssetPulse v0.6 local journeys", () => {
         expect(workOrderFact(secondClient.page, "Version")).toHaveText("1"),
       ]);
 
-      const startPath = `/api/v1/work-orders/${workOrderId}/start`;
       let firstClientStartRequests = 0;
       let secondClientStartRequests = 0;
       firstClient.page.on("request", (request) => {
@@ -500,6 +599,7 @@ test.describe("AssetPulse v0.6 local journeys", () => {
       const winnerIndex = startResponses[0].status() === 200 ? 0 : 1;
       const winner = winnerIndex === 0 ? firstClient.page : secondClient.page;
       const loser = winnerIndex === 0 ? secondClient.page : firstClient.page;
+      conflictClient = loser;
       await Promise.all([
         expect(workOrderFact(winner, "Version")).toHaveText("2"),
         expect(workOrderFact(loser, "Version")).toHaveText("2"),
@@ -538,6 +638,19 @@ test.describe("AssetPulse v0.6 local journeys", () => {
         .filter({ hasText: "Work completed. The work order is now done." });
       await expect(completionFeedback).toBeVisible();
       await expect(completionFeedback).toBeFocused();
+      const history = winner.getByRole("list", {
+        name: "Work-order status history",
+      });
+      await expect(history.getByRole("listitem")).toHaveCount(3);
+      await expect(history.getByRole("listitem").nth(0)).toContainText(
+        "Nora Admin",
+      );
+      await expect(history.getByRole("listitem").nth(1)).toContainText(
+        "Theo Technician",
+      );
+      await expect(history.getByRole("listitem").nth(2)).toContainText(
+        "Theo Technician",
+      );
 
       await activateWithKeyboard(
         winner.getByRole("button", { name: "Back to work orders" }),
@@ -549,10 +662,101 @@ test.describe("AssetPulse v0.6 local journeys", () => {
       await expect(doneRow).toBeVisible();
       await expect(doneRow).toBeFocused();
     } finally {
-      await Promise.all([
-        firstClient.context.close(),
-        secondClient.context.close(),
-      ]);
+      try {
+        expectCleanBrowser(
+          firstClient.page,
+          conflictClient === firstClient.page ? startPath : undefined,
+        );
+        expectCleanBrowser(
+          secondClient.page,
+          conflictClient === secondClient.page ? startPath : undefined,
+        );
+      } finally {
+        await Promise.all([
+          firstClient.context.close(),
+          secondClient.context.close(),
+        ]);
+      }
+    }
+
+    const administrator = await newIsolatedPage(browser, baseURL);
+    try {
+      await openAndSignIn(administrator.page, seededAccounts.northstarAdmin);
+      const counts = administrator.page.locator(
+        'dl[aria-label="Dashboard counts"]',
+      );
+      await expect(counts.locator("dd")).toHaveText(["2", "0", "0"]);
+      const activity = administrator.page.getByRole("region", {
+        name: "Recent activity",
+      });
+      await expect(
+        activity
+          .getByRole("listitem")
+          .filter({ hasText: "Work order completed" }),
+      ).toContainText(workOrderId);
+      await expectNoSeriousAccessibilityViolations(
+        administrator.page,
+        "completed incident dashboard",
+      );
+
+      await openCurrentWorkOrder(administrator.page, WORK_ORDER_ROW_NAMES.done);
+      await expect(workOrderFact(administrator.page, "Version")).toHaveText(
+        "3",
+      );
+      await expect(
+        administrator.page
+          .getByRole("list", { name: "Work-order status history" })
+          .getByRole("listitem"),
+      ).toHaveCount(3);
+      const savedResponse = await browserApiRequest(
+        administrator.page,
+        "GET",
+        `/api/v1/work-orders/${workOrderId}`,
+        { headers: { Accept: "application/json" } },
+      );
+      await expectApiStatus(savedResponse, 200);
+      const saved = await readJsonRecord(savedResponse);
+      expect(saved).toMatchObject({
+        id: workOrderId,
+        alertId,
+        status: "DONE",
+        version: 3,
+      });
+
+      await openProductSection(administrator.page, "Operations");
+      const auditTable = administrator.page.getByRole("table", {
+        name: "Latest organisation audit events (up to 50)",
+      });
+      await expect(auditTable).toBeVisible();
+      for (const [action, actor, subjectId] of [
+        ["Alert acknowledged", "Nora Admin", alertId],
+        ["Work order created", "Nora Admin", workOrderId],
+        ["Work order assigned", "Nora Admin", workOrderId],
+        ["Work order started", "Theo Technician", workOrderId],
+        ["Work order completed", "Theo Technician", workOrderId],
+      ]) {
+        const auditRows = auditTable
+          .locator("tbody tr")
+          .filter({ hasText: subjectId })
+          .filter({ hasText: action });
+        await expect(auditRows).toHaveCount(1);
+        await expect(auditRows).toContainText(actor);
+      }
+      const auditRegion = administrator.page.getByRole("region", {
+        name: "Latest organisation audit events (up to 50)",
+      });
+      await auditRegion.focus();
+      await expect(auditRegion).toBeFocused();
+      await expectNoSeriousAccessibilityViolations(
+        administrator.page,
+        "completed incident audit trail",
+      );
+    } finally {
+      try {
+        expectCleanBrowser(administrator.page);
+      } finally {
+        await administrator.context.close();
+      }
     }
 
     const cleanup = await resetDemoThroughApi(browser, baseURL);
