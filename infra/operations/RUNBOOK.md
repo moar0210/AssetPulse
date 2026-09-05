@@ -62,6 +62,14 @@ purge or a substitute for checking the Neon storage quota. When the free quota i
 near exhaustion, stop simulator activity and suspend the demo until a deliberate
 data-retention decision is made.
 
+Use synthetic data only. The seeded accounts are shared demo accounts. Login
+throttling applies to each email and client-address pair; it does not provide a
+global request limit or stop traffic spread across many pairs. Anonymous CSRF
+requests can create sessions, and repeated accepted writes grow the database.
+There is no lifetime data cap or automatic retention job. Keep demonstration runs
+short, check usage before and after them, and suspend the service if unexpected
+traffic threatens the free allowance.
+
 ## Capture operational evidence
 
 Use Render's log viewer for the accepted deploy; shell access is not available on
