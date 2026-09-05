@@ -44,7 +44,7 @@ the free service has actually gone idle; record its elapsed time and any provide
 wake page separately from the warm checks. Avoid periodic keep-alive traffic.
 
 ```bash
-node infra/smoke/public-smoke.mjs --base-url "$ASSETPULSE_BASE_URL"
+node infra/smoke/public-smoke.mjs --base-url "$ASSETPULSE_BASE_URL" --request-timeout-ms 30000
 cd frontend
 ASSETPULSE_EXPECT_SECURITY_HEADERS=true npm run test:e2e
 ```

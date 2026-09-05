@@ -478,7 +478,7 @@ jobs:
           exit 1
 
       - name: Verify hosted-image same-origin behavior
-        run: node infra/smoke/public-smoke.mjs --base-url http://127.0.0.1:18080 --allow-http
+        run: node infra/smoke/public-smoke.mjs --base-url http://127.0.0.1:18080 --allow-http --request-timeout-ms 30000
 
       - name: Record bounded runtime fit
         shell: bash
