@@ -599,6 +599,79 @@ describe("seeded session application", () => {
     expect(screen.queryByText("PUMP-101-TEMP")).toBeNull();
   });
 
+  it("shows the empty threshold-rule state for a configured sensor", async () => {
+    const ruleFreeAssetDetail = {
+      ...assetDetail,
+      sensors: assetDetail.sensors.map((sensor) => ({
+        ...sensor,
+        thresholdRules: [],
+      })),
+    };
+    installFetch(async (url) => {
+      if (url === "/api/v1/status") {
+        return statusResponse();
+      }
+      if (url === "/api/v1/session/csrf") {
+        return jsonResponse(csrfToken);
+      }
+      if (url === `/api/v1/assets/${assetDetail.id}`) {
+        return jsonResponse(ruleFreeAssetDetail);
+      }
+      return jsonResponse(identity);
+    });
+
+    render(<App />);
+    await openAssets();
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "View details for Boiler Feed Pump (PUMP-101)",
+      }),
+    );
+
+    expect(
+      await screen.findByRole("heading", { name: "Pump casing temperature" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("No threshold rules are configured."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("High temperature")).toBeNull();
+  });
+
+  it("shows the empty sensor-configuration state", async () => {
+    const sensorFreeAssetDetail = {
+      ...assetDetail,
+      sensors: [],
+    };
+    installFetch(async (url) => {
+      if (url === "/api/v1/status") {
+        return statusResponse();
+      }
+      if (url === "/api/v1/session/csrf") {
+        return jsonResponse(csrfToken);
+      }
+      if (url === `/api/v1/assets/${assetDetail.id}`) {
+        return jsonResponse(sensorFreeAssetDetail);
+      }
+      return jsonResponse(identity);
+    });
+
+    render(<App />);
+    await openAssets();
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "View details for Boiler Feed Pump (PUMP-101)",
+      }),
+    );
+
+    expect(
+      await screen.findByRole("heading", { name: "Sensor configuration" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("No sensors are configured.")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: "Pump casing temperature" }),
+    ).toBeNull();
+  });
+
   it("shows asset-detail loading while preserving trusted session controls", async () => {
     installFetch(async (url) => {
       if (url === "/api/v1/status") {
