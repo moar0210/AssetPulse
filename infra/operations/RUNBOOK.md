@@ -22,12 +22,16 @@ passes against its recorded source revision.
    `PGCHANNELBINDING=require`, `ASSETPULSE_APP_USERNAME`, and
    `ASSETPULSE_APP_PASSWORD` as environment variables. The bootstrap rejects an
    administrator-role collision and privileged role memberships. Never use the
-   Neon owner role as the application login.
+   Neon owner role as the application login. The image installs the distribution
+   CA bundle and sets `PGSSLROOTCERT=/etc/ssl/certs/ca-certificates.crt`; preserve
+   that trust path with `PGSSLMODE=verify-full` and required channel binding.
 5. Create the Render Blueprint from `render.yaml`. It selects one Free Docker
    service in Frankfurt, `main`, and deployment after checks pass. The owner enters
    only the application values in Render's secret settings:
-   `SPRING_DATASOURCE_URL=jdbc:postgresql://<direct-host>/<database>?sslmode=verify-full&channelBinding=require`,
+   `SPRING_DATASOURCE_URL=jdbc:postgresql://<direct-host>/<database>?sslmode=verify-full&sslrootcert=/etc/ssl/certs/ca-certificates.crt&channelBinding=require`,
    `SPRING_DATASOURCE_USERNAME`, and `SPRING_DATASOURCE_PASSWORD`.
+   The explicit `sslrootcert` selects the image's installed distribution CA
+   bundle; PgJDBC otherwise looks for a per-user `root.crt` absent from the image.
 6. Verify that the deployed commit matches the accepted `main` revision. The
    startup script takes `RENDER_GIT_COMMIT` as its runtime build identity; structured
    application logs include that value as `service.version`. Locally built images
@@ -37,6 +41,12 @@ passes against its recorded source revision.
    values, database endpoints, or unredacted failure artifacts as evidence.
 
 ## Verify the public origin
+
+Before deployment, the protected Containers job runs
+`bash infra/smoke/database-tls.sh` against both final client images. Its disposable
+PostgreSQL fixture verifies trusted TLS with required channel binding and rejects
+both an untrusted CA and a mismatched host name. This isolates the trust settings;
+the public checks below must still prove the actual Neon connection.
 
 Record the exact revision and UTC time before running these commands. Set
 `ASSETPULSE_BASE_URL` to the generated HTTPS origin. First measure one request after

@@ -2,7 +2,12 @@
 
 FROM postgres:17.10-alpine3.23
 
+RUN apk add --no-cache ca-certificates \
+    && test -s /etc/ssl/certs/ca-certificates.crt
+
 COPY --chown=postgres:postgres --chmod=0555 init-application-role.sh /usr/local/bin/init-application-role.sh
+
+ENV PGSSLROOTCERT=/etc/ssl/certs/ca-certificates.crt
 
 USER postgres
 

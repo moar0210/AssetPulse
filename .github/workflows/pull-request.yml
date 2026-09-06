@@ -182,6 +182,9 @@ jobs:
           format: table
           hide-progress: true
 
+      - name: Verify database certificate trust and rejection
+        run: bash infra/smoke/database-tls.sh
+
       - name: Scan repository for detected secrets
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
