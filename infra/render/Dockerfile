@@ -30,7 +30,8 @@ ARG ASSETPULSE_BUILD_REVISION=unknown
 
 LABEL org.opencontainers.image.revision="${ASSETPULSE_BUILD_REVISION}"
 
-RUN apk add --no-cache bash gettext nginx tini \
+RUN apk add --no-cache bash ca-certificates gettext nginx tini \
+    && test -s /etc/ssl/certs/ca-certificates.crt \
     && addgroup -S -g 10001 assetpulse \
     && adduser -S -D -H -h /nonexistent -u 10001 -G assetpulse assetpulse
 
