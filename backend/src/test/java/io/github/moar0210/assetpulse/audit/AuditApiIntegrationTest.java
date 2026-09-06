@@ -253,14 +253,17 @@ class AuditApiIntegrationTest {
     }
 
     @Test
-    void aud01InspectionDoesNotProvideMutationRoutes() throws Exception {
+    void aud01MutationRoutesAreDeniedByDefault() throws Exception {
         for (HttpMethod method :
                 List.of(HttpMethod.POST, HttpMethod.PUT, HttpMethod.PATCH, HttpMethod.DELETE)) {
             mockMvc.perform(
                             request(method, PATH)
                                     .with(user(users.loadUserByUsername("admin@northstar.example")))
                                     .with(csrf()))
-                    .andExpect(status().isMethodNotAllowed());
+                    .andExpect(status().isForbidden())
+                    .andExpect(
+                            content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
+                    .andExpect(jsonPath("$.code").value("ACCESS_DENIED"));
         }
     }
 

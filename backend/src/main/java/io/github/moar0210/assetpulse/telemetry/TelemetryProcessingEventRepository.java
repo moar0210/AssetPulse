@@ -20,6 +20,8 @@ public class TelemetryProcessingEventRepository {
                 telemetry_batch_id,
                 event_type,
                 created_at,
+                trace_parent,
+                trace_state,
                 next_attempt_at,
                 updated_at
             )
@@ -29,6 +31,8 @@ public class TelemetryProcessingEventRepository {
                 :telemetryBatchId,
                 'TELEMETRY_BATCH_ACCEPTED',
                 :createdAt,
+                :traceParent,
+                :traceState,
                 :createdAt,
                 :createdAt
             )
@@ -100,6 +104,8 @@ public class TelemetryProcessingEventRepository {
                 event.telemetry_batch_id,
                 event.event_type,
                 event.created_at,
+                event.trace_parent,
+                event.trace_state,
                 event.claim_token,
                 event.attempt_count,
                 event.lease_expires_at
@@ -112,7 +118,9 @@ public class TelemetryProcessingEventRepository {
                 organisation_id,
                 telemetry_batch_id,
                 event_type,
-                created_at
+                created_at,
+                trace_parent,
+                trace_state
             FROM telemetry_processing_event
             WHERE id = :eventId
               AND status = 'PROCESSING'
@@ -172,14 +180,27 @@ public class TelemetryProcessingEventRepository {
         this.jdbcClient = jdbcClient;
     }
 
-    public void insertBatchAccepted(UUID organisationId, UUID telemetryBatchId, Instant createdAt) {
+    public UUID insertBatchAccepted(UUID organisationId, UUID telemetryBatchId, Instant createdAt) {
+        return insertBatchAccepted(organisationId, telemetryBatchId, createdAt, null, null);
+    }
+
+    public UUID insertBatchAccepted(
+            UUID organisationId,
+            UUID telemetryBatchId,
+            Instant createdAt,
+            String traceParent,
+            String traceState) {
+        UUID eventId = UUID.randomUUID();
         jdbcClient
                 .sql(INSERT_ACCEPTED_EVENT)
-                .param("id", UUID.randomUUID())
+                .param("id", eventId)
                 .param("organisationId", organisationId)
                 .param("telemetryBatchId", telemetryBatchId)
                 .param("createdAt", createdAt.atOffset(ZoneOffset.UTC))
+                .param("traceParent", traceParent, Types.VARCHAR)
+                .param("traceState", traceState, Types.VARCHAR)
                 .update();
+        return eventId;
     }
 
     public int moveExhaustedExpiredLeasesToDead(
@@ -278,6 +299,8 @@ public class TelemetryProcessingEventRepository {
                 resultSet.getObject("organisation_id", UUID.class),
                 resultSet.getObject("telemetry_batch_id", UUID.class),
                 resultSet.getString("event_type"),
-                resultSet.getObject("created_at", OffsetDateTime.class).toInstant());
+                resultSet.getObject("created_at", OffsetDateTime.class).toInstant(),
+                resultSet.getString("trace_parent"),
+                resultSet.getString("trace_state"));
     }
 }

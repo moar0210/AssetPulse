@@ -3,6 +3,9 @@ package io.github.moar0210.assetpulse.telemetry;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import java.sql.Types;
+import java.time.Duration;
+import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.util.UUID;
 import org.junit.jupiter.api.BeforeEach;
@@ -39,6 +42,7 @@ class TelemetryProcessingEventConstraintIntegrationTest {
     }
 
     @Autowired private JdbcClient jdbcClient;
+    @Autowired private TelemetryProcessingMetricsRepository metricsRepository;
 
     @BeforeEach
     void clearTelemetry() {
@@ -113,6 +117,109 @@ class TelemetryProcessingEventConstraintIntegrationTest {
         assertThat(countEvents()).isZero();
     }
 
+    @Test
+    void persistsOnlyValidW3cTraceContext() {
+        UUID batchId = UUID.randomUUID();
+        String traceParent = "00-11111111111111111111111111111111-2222222222222222-01";
+        insertBatch(batchId, NORTHSTAR_ID, "valid-trace-context");
+        insertEvent(
+                UUID.randomUUID(),
+                NORTHSTAR_ID,
+                batchId,
+                "TELEMETRY_BATCH_ACCEPTED",
+                traceParent,
+                "assetpulse=accepted");
+
+        assertThat(
+                        jdbcClient
+                                .sql(
+                                        """
+                                        SELECT trace_parent || '|' || trace_state
+                                        FROM telemetry_processing_event
+                                        """)
+                                .query(String.class)
+                                .single())
+                .isEqualTo(traceParent + "|assetpulse=accepted");
+        assertThatThrownBy(
+                        () ->
+                                jdbcClient
+                                        .sql(
+                                                """
+                                                UPDATE telemetry_processing_event
+                                                SET trace_parent =
+                                                    '00-00000000000000000000000000000000-2222222222222222-01'
+                                                """)
+                                        .update())
+                .isInstanceOf(DataIntegrityViolationException.class);
+    }
+
+    @Test
+    void reportsPendingLagRetryAndDeadStateFromOneAggregateSnapshot() {
+        Instant createdAt = Instant.parse("2026-09-01T12:00:00Z");
+        Instant observedAt = createdAt.plusSeconds(45);
+        UUID batchId = UUID.randomUUID();
+        UUID eventId = UUID.randomUUID();
+        insertBatch(batchId, NORTHSTAR_ID, "metrics-snapshot");
+        insertEvent(eventId, NORTHSTAR_ID, batchId, "TELEMETRY_BATCH_ACCEPTED");
+        jdbcClient
+                .sql(
+                        """
+                        UPDATE telemetry_processing_event
+                        SET created_at = :createdAt,
+                            next_attempt_at = :createdAt,
+                            updated_at = :createdAt
+                        WHERE id = :eventId
+                        """)
+                .param("createdAt", createdAt.atOffset(java.time.ZoneOffset.UTC))
+                .param("eventId", eventId)
+                .update();
+
+        assertThat(metricsRepository.readSnapshot(observedAt))
+                .isEqualTo(
+                        new TelemetryProcessingMetricsSnapshot(
+                                1,
+                                Duration.between(createdAt, observedAt).toSeconds(),
+                                0,
+                                0,
+                                observedAt));
+
+        jdbcClient
+                .sql(
+                        """
+                        UPDATE telemetry_processing_event
+                        SET attempt_count = 1,
+                            last_error_code = 'PROCESSING_FAILED',
+                            last_error_message = 'Retry scheduled',
+                            updated_at = :observedAt
+                        WHERE id = :eventId
+                        """)
+                .param("observedAt", observedAt.atOffset(java.time.ZoneOffset.UTC))
+                .param("eventId", eventId)
+                .update();
+        assertThat(metricsRepository.readSnapshot(observedAt).retryingCount()).isOne();
+
+        jdbcClient
+                .sql(
+                        """
+                        UPDATE telemetry_processing_event
+                        SET status = 'DEAD',
+                            attempt_count = 5,
+                            next_attempt_at = NULL,
+                            dead_at = :observedAt,
+                            updated_at = :observedAt
+                        WHERE id = :eventId
+                        """)
+                .param("observedAt", observedAt.atOffset(java.time.ZoneOffset.UTC))
+                .param("eventId", eventId)
+                .update();
+        TelemetryProcessingMetricsSnapshot deadSnapshot =
+                metricsRepository.readSnapshot(observedAt);
+        assertThat(deadSnapshot.pendingCount()).isZero();
+        assertThat(deadSnapshot.processingLagSeconds()).isZero();
+        assertThat(deadSnapshot.retryingCount()).isZero();
+        assertThat(deadSnapshot.deadCount()).isOne();
+    }
+
     private void insertBatch(UUID batchId, UUID organisationId, String idempotencyKey) {
         jdbcClient
                 .sql(
@@ -143,6 +250,16 @@ class TelemetryProcessingEventConstraintIntegrationTest {
     }
 
     private void insertEvent(UUID eventId, UUID organisationId, UUID batchId, String eventType) {
+        insertEvent(eventId, organisationId, batchId, eventType, null, null);
+    }
+
+    private void insertEvent(
+            UUID eventId,
+            UUID organisationId,
+            UUID batchId,
+            String eventType,
+            String traceParent,
+            String traceState) {
         jdbcClient
                 .sql(
                         """
@@ -151,14 +268,18 @@ class TelemetryProcessingEventConstraintIntegrationTest {
                             organisation_id,
                             telemetry_batch_id,
                             event_type,
-                            created_at
+                            created_at,
+                            trace_parent,
+                            trace_state
                         )
                         VALUES (
                             :id,
                             :organisationId,
                             :batchId,
                             :eventType,
-                            :createdAt
+                            :createdAt,
+                            :traceParent,
+                            :traceState
                         )
                         """)
                 .param("id", eventId)
@@ -166,6 +287,8 @@ class TelemetryProcessingEventConstraintIntegrationTest {
                 .param("batchId", batchId)
                 .param("eventType", eventType)
                 .param("createdAt", OffsetDateTime.parse("2026-08-13T12:00:00Z"))
+                .param("traceParent", traceParent, Types.VARCHAR)
+                .param("traceState", traceState, Types.VARCHAR)
                 .update();
     }
 

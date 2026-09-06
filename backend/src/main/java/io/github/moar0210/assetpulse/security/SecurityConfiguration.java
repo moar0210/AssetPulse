@@ -4,6 +4,7 @@ import io.github.moar0210.assetpulse.audit.AuditAction;
 import io.github.moar0210.assetpulse.audit.AuditService;
 import io.github.moar0210.assetpulse.identity.AuthenticatedActor;
 import io.github.moar0210.assetpulse.identity.DatabaseUserDetailsService;
+import io.github.moar0210.assetpulse.observability.RequestLogFilter;
 import jakarta.servlet.DispatcherType;
 import java.util.List;
 import org.springframework.context.annotation.Bean;
@@ -25,12 +26,15 @@ import org.springframework.security.web.authentication.session.ChangeSessionIdAu
 import org.springframework.security.web.authentication.session.CompositeSessionAuthenticationStrategy;
 import org.springframework.security.web.authentication.session.SessionAuthenticationStrategy;
 import org.springframework.security.web.context.HttpSessionSecurityContextRepository;
+import org.springframework.security.web.context.SecurityContextHolderFilter;
 import org.springframework.security.web.context.SecurityContextRepository;
 import org.springframework.security.web.csrf.CsrfAuthenticationStrategy;
 import org.springframework.security.web.csrf.CsrfTokenRequestAttributeHandler;
 import org.springframework.security.web.csrf.HttpSessionCsrfTokenRepository;
 import org.springframework.security.web.csrf.InvalidCsrfTokenException;
 import org.springframework.security.web.csrf.MissingCsrfTokenException;
+import org.springframework.security.web.header.writers.ReferrerPolicyHeaderWriter.ReferrerPolicy;
+import org.springframework.security.web.header.writers.StaticHeadersWriter;
 import org.springframework.security.web.servlet.util.matcher.PathPatternRequestMatcher;
 import org.springframework.transaction.TransactionException;
 
@@ -96,6 +100,18 @@ public class SecurityConfiguration {
                 .requestCache(cache -> cache.disable())
                 .formLogin(form -> form.disable())
                 .httpBasic(basic -> basic.disable())
+                .headers(
+                        headers ->
+                                headers.contentSecurityPolicy(
+                                                policy ->
+                                                        policy.policyDirectives(
+                                                                "default-src 'self'; base-uri 'self'; connect-src 'self'; font-src 'self'; form-action 'self'; frame-ancestors 'none'; img-src 'self' data:; object-src 'none'; script-src 'self'; style-src 'self'"))
+                                        .referrerPolicy(
+                                                policy -> policy.policy(ReferrerPolicy.NO_REFERRER))
+                                        .addHeaderWriter(
+                                                new StaticHeadersWriter(
+                                                        "Permissions-Policy",
+                                                        "camera=(), geolocation=(), microphone=()")))
                 .csrf(
                         csrf ->
                                 csrf.csrfTokenRepository(csrfTokenRepository)
@@ -185,12 +201,22 @@ public class SecurityConfiguration {
                                         .permitAll()
                                         .requestMatchers(HttpMethod.GET, "/api/v1/session/csrf")
                                         .permitAll()
+                                        .requestMatchers(HttpMethod.HEAD, "/api/v1/session/csrf")
+                                        .permitAll()
                                         .requestMatchers(HttpMethod.POST, "/api/v1/session")
                                         .permitAll()
                                         .requestMatchers(HttpMethod.DELETE, "/api/v1/session")
                                         .permitAll()
                                         .requestMatchers(HttpMethod.GET, "/api/v1/session")
                                         .authenticated()
+                                        .requestMatchers(HttpMethod.HEAD, "/api/v1/session")
+                                        .authenticated()
+                                        .requestMatchers(HttpMethod.GET, "/api/v1/dashboard")
+                                        .hasAnyRole("OPERATIONS_ADMIN", "TECHNICIAN", "VIEWER")
+                                        .requestMatchers(HttpMethod.HEAD, "/api/v1/dashboard")
+                                        .hasAnyRole("OPERATIONS_ADMIN", "TECHNICIAN", "VIEWER")
+                                        .requestMatchers(HttpMethod.POST, "/api/v1/demo/reset")
+                                        .hasRole("OPERATIONS_ADMIN")
                                         .requestMatchers(HttpMethod.GET, "/api/v1/audit-events")
                                         .hasRole("OPERATIONS_ADMIN")
                                         .requestMatchers(HttpMethod.HEAD, "/api/v1/audit-events")
@@ -200,11 +226,26 @@ public class SecurityConfiguration {
                                         .requestMatchers(HttpMethod.GET, "/api/v1/assets/{assetId}")
                                         .hasAnyRole("OPERATIONS_ADMIN", "TECHNICIAN", "VIEWER")
                                         .requestMatchers(
+                                                HttpMethod.HEAD,
+                                                "/api/v1/assets",
+                                                "/api/v1/assets/{assetId}")
+                                        .hasAnyRole("OPERATIONS_ADMIN", "TECHNICIAN", "VIEWER")
+                                        .requestMatchers(
                                                 HttpMethod.GET,
                                                 "/api/v1/sensors/{sensorId}/telemetry-readings")
                                         .hasAnyRole("OPERATIONS_ADMIN", "TECHNICIAN", "VIEWER")
                                         .requestMatchers(
+                                                HttpMethod.HEAD,
+                                                "/api/v1/sensors/{sensorId}/telemetry-readings")
+                                        .hasAnyRole("OPERATIONS_ADMIN", "TECHNICIAN", "VIEWER")
+                                        .requestMatchers(
                                                 HttpMethod.GET,
+                                                "/api/v1/alerts",
+                                                "/api/v1/alerts/stream",
+                                                "/api/v1/alerts/{alertId}")
+                                        .hasAnyRole("OPERATIONS_ADMIN", "TECHNICIAN", "VIEWER")
+                                        .requestMatchers(
+                                                HttpMethod.HEAD,
                                                 "/api/v1/alerts",
                                                 "/api/v1/alerts/stream",
                                                 "/api/v1/alerts/{alertId}")
@@ -224,6 +265,11 @@ public class SecurityConfiguration {
                                         .hasRole("OPERATIONS_ADMIN")
                                         .requestMatchers(
                                                 HttpMethod.GET,
+                                                "/api/v1/work-orders",
+                                                "/api/v1/work-orders/{workOrderId}")
+                                        .hasAnyRole("OPERATIONS_ADMIN", "TECHNICIAN", "VIEWER")
+                                        .requestMatchers(
+                                                HttpMethod.HEAD,
                                                 "/api/v1/work-orders",
                                                 "/api/v1/work-orders/{workOrderId}")
                                         .hasAnyRole("OPERATIONS_ADMIN", "TECHNICIAN", "VIEWER")
@@ -251,9 +297,11 @@ public class SecurityConfiguration {
                                                 HttpMethod.POST, "/api/v1/telemetry-batches")
                                         .hasRole("OPERATIONS_ADMIN")
                                         .requestMatchers("/api/**")
-                                        .authenticated()
+                                        .denyAll()
                                         .anyRequest()
                                         .denyAll());
+
+        http.addFilterAfter(new RequestLogFilter(), SecurityContextHolderFilter.class);
 
         return http.build();
     }

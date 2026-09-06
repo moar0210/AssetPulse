@@ -217,7 +217,7 @@ class AssetListIntegrationTest {
     }
 
     @Test
-    void assetMutationRoutesRemainAbsent() throws Exception {
+    void assetMutationRoutesAreDeniedByDefault() throws Exception {
         MockHttpSession session = login("admin@northstar.example");
         CsrfExchange csrf = csrf(session);
         List<MockHttpServletRequestBuilder> mutations =
@@ -233,7 +233,10 @@ class AssetListIntegrationTest {
                                     .header(csrf.headerName(), csrf.token())
                                     .contentType(MediaType.APPLICATION_JSON)
                                     .content("{}"))
-                    .andExpect(status().isMethodNotAllowed());
+                    .andExpect(status().isForbidden())
+                    .andExpect(
+                            content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
+                    .andExpect(jsonPath("$.code").value("ACCESS_DENIED"));
         }
     }
 
@@ -269,6 +272,63 @@ class AssetListIntegrationTest {
                                 .value("GREATER_THAN_OR_EQUAL_TO"))
                 .andExpect(jsonPath("$.sensors[0].thresholdRules[0].enabled").value(true))
                 .andExpect(content().string(not(containsString("organisationId"))));
+    }
+
+    @Test
+    @Transactional
+    void assetDetailCapsSensorsAndRulesAtOneHundredWithDeterministicIdTieBreaks() throws Exception {
+        UUID assetId = UUID.fromString("22000000-0000-0000-0000-000000000001");
+        insertAsset(assetId, NORTHSTAR_ID, "BOUNDED-DETAIL", "Bounded Detail Asset");
+
+        List<UUID> sensorIds = new ArrayList<>();
+        for (int index = 0; index < 101; index++) {
+            sensorIds.add(UUID.fromString("31000000-0000-0000-0000-%012d".formatted(index + 1)));
+        }
+        for (int index = sensorIds.size() - 1; index >= 0; index--) {
+            insertSensor(
+                    sensorIds.get(index),
+                    NORTHSTAR_ID,
+                    assetId,
+                    "BOUNDED-SENSOR-%03d".formatted(index),
+                    "Bounded Sensor");
+        }
+
+        List<UUID> ruleIds = new ArrayList<>();
+        for (int index = 0; index < 101; index++) {
+            ruleIds.add(UUID.fromString("41000000-0000-0000-0000-%012d".formatted(index + 1)));
+        }
+        for (int index = ruleIds.size() - 1; index >= 0; index--) {
+            insertThresholdRule(
+                    ruleIds.get(index),
+                    NORTHSTAR_ID,
+                    sensorIds.getFirst(),
+                    "BOUNDED-RULE-%03d".formatted(index),
+                    "Bounded Rule");
+        }
+
+        MvcResult result =
+                mockMvc.perform(
+                                get(ASSETS_PATH + "/" + assetId)
+                                        .session(login("viewer@northstar.example"))
+                                        .accept(MediaType.APPLICATION_JSON))
+                        .andExpect(status().isOk())
+                        .andExpect(header().string("Cache-Control", "no-store"))
+                        .andReturn();
+        JsonNode response = objectMapper.readTree(result.getResponse().getContentAsString());
+        JsonNode sensors = response.path("sensors");
+        JsonNode thresholdRules = sensors.get(0).path("thresholdRules");
+
+        assertThat(sensors).hasSize(100);
+        assertThat(ids(sensors))
+                .containsExactlyElementsOf(
+                        sensorIds.stream().limit(100).map(UUID::toString).toList());
+        assertThat(thresholdRules).hasSize(100);
+        assertThat(ids(thresholdRules))
+                .containsExactlyElementsOf(
+                        ruleIds.stream().limit(100).map(UUID::toString).toList());
+        assertThat(response.toString())
+                .doesNotContain(sensorIds.get(100).toString())
+                .doesNotContain(ruleIds.get(100).toString());
     }
 
     @Test
@@ -309,7 +369,7 @@ class AssetListIntegrationTest {
     }
 
     @Test
-    void assetDetailMutationRoutesRemainAbsent() throws Exception {
+    void assetDetailMutationRoutesAreDeniedByDefault() throws Exception {
         MockHttpSession session = login("admin@northstar.example");
         CsrfExchange csrf = csrf(session);
         for (MockHttpServletRequestBuilder mutation :
@@ -323,7 +383,10 @@ class AssetListIntegrationTest {
                                     .header(csrf.headerName(), csrf.token())
                                     .contentType(MediaType.APPLICATION_JSON)
                                     .content("{}"))
-                    .andExpect(status().isMethodNotAllowed());
+                    .andExpect(status().isForbidden())
+                    .andExpect(
+                            content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
+                    .andExpect(jsonPath("$.code").value("ACCESS_DENIED"));
         }
     }
 
@@ -344,6 +407,12 @@ class AssetListIntegrationTest {
         List<String> names = new ArrayList<>();
         response.path("assets").forEach(asset -> names.add(asset.path("name").asText()));
         return names;
+    }
+
+    private List<String> ids(JsonNode array) {
+        List<String> ids = new ArrayList<>();
+        array.forEach(element -> ids.add(element.path("id").asText()));
+        return ids;
     }
 
     private void assertExactAssets(JsonNode response, List<ExpectedAsset> expectedAssets) {
@@ -419,6 +488,50 @@ class AssetListIntegrationTest {
                 .param("organisationId", organisationId)
                 .param("assetCode", assetCode)
                 .param("assetName", assetName)
+                .update();
+    }
+
+    private void insertSensor(
+            UUID id, UUID organisationId, UUID assetId, String sensorKey, String sensorName) {
+        jdbcClient
+                .sql(
+                        """
+                        INSERT INTO sensor (
+                            id, organisation_id, asset_id, sensor_key, name,
+                            measurement_type, unit
+                        )
+                        VALUES (
+                            :id, :organisationId, :assetId, :sensorKey, :sensorName,
+                            'TEMPERATURE', 'CELSIUS'
+                        )
+                        """)
+                .param("id", id)
+                .param("organisationId", organisationId)
+                .param("assetId", assetId)
+                .param("sensorKey", sensorKey)
+                .param("sensorName", sensorName)
+                .update();
+    }
+
+    private void insertThresholdRule(
+            UUID id, UUID organisationId, UUID sensorId, String ruleCode, String ruleName) {
+        jdbcClient
+                .sql(
+                        """
+                        INSERT INTO threshold_rule (
+                            id, organisation_id, sensor_id, rule_code, name, comparison,
+                            threshold_value, cooldown_seconds, enabled
+                        )
+                        VALUES (
+                            :id, :organisationId, :sensorId, :ruleCode, :ruleName,
+                            'GREATER_THAN_OR_EQUAL_TO', 80.000000, 300, TRUE
+                        )
+                        """)
+                .param("id", id)
+                .param("organisationId", organisationId)
+                .param("sensorId", sensorId)
+                .param("ruleCode", ruleCode)
+                .param("ruleName", ruleName)
                 .update();
     }
 

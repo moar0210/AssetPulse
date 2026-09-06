@@ -5,6 +5,7 @@ import {
   getCsrfToken,
   getCurrentSession,
   login,
+  LoginRateLimitedError,
   logout,
   RequestVerificationFailedError,
 } from "./session";
@@ -141,6 +142,58 @@ describe("session API client", () => {
       login({ email: "missing@example.com", password: "incorrect" }, csrfToken),
     ).rejects.toBeInstanceOf(AuthenticationFailedError);
   });
+
+  it("classifies login throttling and exposes a bounded delta-seconds hint", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<typeof fetch>().mockResolvedValue(
+        new Response(JSON.stringify({ code: "LOGIN_RATE_LIMITED" }), {
+          status: 429,
+          headers: {
+            "Content-Type": "application/problem+json",
+            "Retry-After": "900",
+          },
+        }),
+      ),
+    );
+
+    const error = await login(
+      { email: "missing@example.com", password: "incorrect" },
+      csrfToken,
+    ).catch((reason: unknown) => reason);
+
+    expect(error).toBeInstanceOf(LoginRateLimitedError);
+    expect((error as LoginRateLimitedError).retryAfterSeconds).toBe(900);
+  });
+
+  it.each(["0", "86401", "1.5", "tomorrow", null])(
+    "does not expose an invalid or excessive Retry-After value (%s)",
+    async (retryAfter) => {
+      const headers = new Headers({
+        "Content-Type": "application/problem+json",
+      });
+      if (retryAfter !== null) {
+        headers.set("Retry-After", retryAfter);
+      }
+      vi.stubGlobal(
+        "fetch",
+        vi.fn<typeof fetch>().mockResolvedValue(
+          new Response(JSON.stringify({ code: "LOGIN_RATE_LIMITED" }), {
+            status: 429,
+            headers,
+          }),
+        ),
+      );
+
+      const error = await login(
+        { email: "missing@example.com", password: "incorrect" },
+        csrfToken,
+      ).catch((reason: unknown) => reason);
+
+      expect(error).toBeInstanceOf(LoginRateLimitedError);
+      expect((error as LoginRateLimitedError).retryAfterSeconds).toBeNull();
+    },
+  );
 
   it("classifies rejected CSRF verification for session mutations", async () => {
     vi.stubGlobal(

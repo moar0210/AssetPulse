@@ -58,7 +58,7 @@ class DatabaseMigrationTest {
         }
 
         assertThat(firstState)
-                .isEqualTo(new DatabaseState("14", 14, 2, 3, 4, 3, 3, 3, 0, 0, 0, 0, 0, 0, 0, 0));
+                .isEqualTo(new DatabaseState("16", 16, 2, 3, 4, 3, 3, 3, 0, 0, 0, 0, 0, 0, 0, 0));
         assertThat(firstSeedRows).hasSize(18);
     }
 

@@ -59,6 +59,7 @@ describe("AUD-01 audit-events API client", () => {
   it.each([
     ["AUTHENTICATION_SUCCEEDED", "USER"],
     ["SESSION_ENDED", "USER"],
+    ["DEMO_RESET", "USER"],
     ["ALERT_ACKNOWLEDGED", "ALERT"],
     ["ALERT_RESOLVED", "ALERT"],
     ["WORK_ORDER_CREATED", "WORK_ORDER"],
@@ -161,7 +162,7 @@ describe("AUD-01 audit-events API client", () => {
     }
   });
 
-  it.each(["AUTHENTICATION_SUCCEEDED", "SESSION_ENDED"] as const)(
+  it.each(["AUTHENTICATION_SUCCEEDED", "SESSION_ENDED", "DEMO_RESET"] as const)(
     "rejects %s attributed to a different user",
     async (action) => {
       mockEvents([

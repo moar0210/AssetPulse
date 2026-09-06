@@ -458,8 +458,14 @@ describe("live alert experience", () => {
     ).toBeVisible();
     expect(screen.getByText("PUMP-101-TEMP")).toBeVisible();
 
-    fireEvent.click(screen.getByRole("button", { name: "Acknowledge alert" }));
-    expect(await screen.findByText("Alert acknowledged.")).toBeVisible();
+    const acknowledgeButton = screen.getByRole("button", {
+      name: "Acknowledge alert",
+    });
+    acknowledgeButton.focus();
+    fireEvent.click(acknowledgeButton);
+    const acknowledgedFeedback = await screen.findByText("Alert acknowledged.");
+    expect(acknowledgedFeedback).toBeVisible();
+    await waitFor(() => expect(acknowledgedFeedback).toHaveFocus());
     expect(screen.getByText("Nora Admin")).toBeVisible();
     expect(screen.getByRole("button", { name: "Resolve alert" })).toBeEnabled();
 

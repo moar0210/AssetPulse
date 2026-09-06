@@ -67,7 +67,8 @@ class TelemetryBatchTransactionIntegrationTest {
                             throw new IllegalStateException("simulated event insert failure");
                         })
                 .when(processingEventRepository)
-                .insertBatchAccepted(eq(NORTHSTAR_ID), any(UUID.class), any(Instant.class));
+                .insertBatchAccepted(
+                        eq(NORTHSTAR_ID), any(UUID.class), any(Instant.class), any(), any());
 
         TelemetryBatchRequest request =
                 new TelemetryBatchRequest(

@@ -10,7 +10,8 @@ public enum AuditAction {
     WORK_ORDER_ASSIGNED(AuditSubjectType.WORK_ORDER),
     WORK_ORDER_STARTED(AuditSubjectType.WORK_ORDER),
     WORK_ORDER_COMPLETED(AuditSubjectType.WORK_ORDER),
-    PROCESSING_EVENT_RETRIED(AuditSubjectType.PROCESSING_EVENT);
+    PROCESSING_EVENT_RETRIED(AuditSubjectType.PROCESSING_EVENT),
+    DEMO_RESET(AuditSubjectType.USER);
 
     private final AuditSubjectType subjectType;
 

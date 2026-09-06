@@ -4,6 +4,10 @@ import { pathToFileURL } from "node:url";
 const HEALTH_BODY = "healthy\n";
 const STATUS_BODY = '{"status":"available"}';
 const JSON_MEDIA_TYPE = "application/json";
+const EVENT_STREAM_MEDIA_TYPE = "text/event-stream";
+const STRICT_TRANSPORT_SECURITY = "max-age=31536000; includeSubDomains";
+const READY_EVENT_FRAME = "event:ready\ndata:{}\n\n";
+const MAX_SSE_FRAME_CHARACTERS = 4_096;
 const SESSION_COOKIE = "ASSETPULSE_SESSION";
 const NORTHSTAR_EMAIL = "admin@northstar.example";
 const NORTHSTAR_PASSWORD = "AssetPulse1!";
@@ -98,6 +102,23 @@ function assertNoStore(response, check) {
     response.headers.get("cache-control")?.trim().toLowerCase() !== "no-store"
   ) {
     fail(check, "expected Cache-Control: no-store");
+  }
+}
+
+export function assertStrictTransportSecurity(response, baseUrl, check) {
+  if (new URL(baseUrl).protocol !== "https:") {
+    return;
+  }
+
+  const actual = response.headers.get("strict-transport-security")?.trim();
+  if (actual === undefined) {
+    fail(check, "expected Strict-Transport-Security on the HTTPS response");
+  }
+  if (actual.toLowerCase() !== STRICT_TRANSPORT_SECURITY.toLowerCase()) {
+    fail(
+      check,
+      `expected Strict-Transport-Security: ${STRICT_TRANSPORT_SECURITY}`,
+    );
   }
 }
 
@@ -244,6 +265,15 @@ export function normalizeBaseUrl(baseUrl, { allowHttp = false } = {}) {
     fail(
       "configuration",
       "base URL must use HTTPS (pass --allow-http only for an explicit local check)",
+    );
+  }
+  if (
+    parsed.protocol === "http:" &&
+    !["localhost", "127.0.0.1", "::1", "[::1]"].includes(parsed.hostname)
+  ) {
+    fail(
+      "configuration",
+      "the HTTP override may only target a loopback origin",
     );
   }
 
@@ -410,6 +440,7 @@ async function exactPublicEndpoints(baseUrl, fetchImpl, requestTimeoutMs) {
   });
   assertStatus(health.response, 200, "health");
   assertMediaType(health.response, "text/plain", "health");
+  assertStrictTransportSecurity(health.response, baseUrl, "health-hsts");
   if ((await health.response.text()) !== HEALTH_BODY) {
     fail("health", 'expected the exact body "healthy\\n"');
   }
@@ -422,6 +453,7 @@ async function exactPublicEndpoints(baseUrl, fetchImpl, requestTimeoutMs) {
   });
   assertStatus(status.response, 200, "status");
   assertMediaType(status.response, JSON_MEDIA_TYPE, "status");
+  assertStrictTransportSecurity(status.response, baseUrl, "status-hsts");
   if ((await status.response.text()) !== STATUS_BODY) {
     fail("status", `expected the exact body ${STATUS_BODY}`);
   }
@@ -577,6 +609,83 @@ async function csrfExchange(
   return { ...payload, parsedCookies };
 }
 
+async function readFirstEventFrame(response, check) {
+  if (response.body === null) {
+    fail(check, "expected a readable event stream body");
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let body = "";
+
+  try {
+    for (;;) {
+      let chunk;
+      try {
+        chunk = await reader.read();
+      } catch (cause) {
+        fail(check, "event stream failed before a complete frame arrived", {
+          cause,
+        });
+      }
+
+      if (chunk.done) {
+        body += decoder.decode();
+      } else {
+        body += decoder.decode(chunk.value, { stream: true });
+      }
+
+      const normalizedBody = body.replaceAll("\r\n", "\n");
+      if (normalizedBody.length > MAX_SSE_FRAME_CHARACTERS) {
+        fail(check, "first event frame exceeded the bounded smoke limit");
+      }
+
+      const frameEnd = normalizedBody.indexOf("\n\n");
+      if (frameEnd !== -1) {
+        return `${normalizedBody.slice(0, frameEnd)}\n\n`;
+      }
+
+      if (chunk.done) {
+        fail(check, "event stream ended before a complete frame arrived");
+      }
+    }
+  } finally {
+    try {
+      await reader.cancel();
+    } catch {
+      // A timed-out or remotely closed stream is already cancelled.
+    }
+  }
+}
+
+async function verifyAlertStreamReady(
+  baseUrl,
+  fetchImpl,
+  requestTimeoutMs,
+  cookieJar,
+  check,
+) {
+  const { response } = await fetchResponse(
+    fetchImpl,
+    `${baseUrl}/api/v1/alerts/stream`,
+    {
+      check,
+      requestTimeoutMs,
+      cookieJar,
+      method: "GET",
+      headers: { Accept: EVENT_STREAM_MEDIA_TYPE },
+    },
+  );
+  assertStatus(response, 200, check);
+  assertMediaType(response, EVENT_STREAM_MEDIA_TYPE, check);
+  assertNoStore(response, check);
+
+  const frame = await readFirstEventFrame(response, check);
+  if (frame !== READY_EVENT_FRAME) {
+    fail(check, "expected the exact complete ready event frame");
+  }
+}
+
 export async function runPublicSmoke({
   baseUrl,
   password = NORTHSTAR_PASSWORD,
@@ -694,6 +803,22 @@ export async function runPublicSmoke({
   });
   assertExactAssets(assetPayload);
   complete("trusted-northstar-asset-scope");
+
+  await verifyAlertStreamReady(
+    normalizedBaseUrl,
+    fetchImpl,
+    requestTimeoutMs,
+    cookieJar,
+    "alert-stream-initial",
+  );
+  await verifyAlertStreamReady(
+    normalizedBaseUrl,
+    fetchImpl,
+    requestTimeoutMs,
+    cookieJar,
+    "alert-stream-reconnect",
+  );
+  complete("alert-stream-ready-and-reconnect");
 
   const preLogoutCookie = cookieJar.header();
   const logout = await fetchResponse(

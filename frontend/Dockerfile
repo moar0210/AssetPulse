@@ -13,7 +13,8 @@ RUN npm run build
 FROM nginx:1.29.8-alpine3.23 AS runtime
 
 ENV BACKEND_UPSTREAM=backend:8080 \
-    NGINX_ENVSUBST_FILTER=^BACKEND_UPSTREAM$ \
+    FRONTEND_PORT=8080 \
+    NGINX_ENVSUBST_FILTER=^(BACKEND_UPSTREAM|FRONTEND_PORT)$ \
     NGINX_ENVSUBST_OUTPUT_DIR=/tmp
 
 COPY nginx.conf /etc/nginx/templates/nginx.conf.template
