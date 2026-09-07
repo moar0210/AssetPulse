@@ -950,6 +950,7 @@ export function WorkOrderPanel({
                     }
                   }}
                   className="work-order-row-button"
+                  data-work-order-id={workOrder.id}
                   type="button"
                   aria-label={`View ${statusLabels[workOrder.status].toLowerCase()} work order for ${workOrder.context.assetName}: ${workOrder.context.ruleName}`}
                   onClick={() => {

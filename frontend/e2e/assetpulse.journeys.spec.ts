@@ -66,10 +66,17 @@ function assetNames(payload: Record<string, unknown>): string[] {
 async function openCurrentWorkOrder(
   page: Page,
   rowName: string,
+  expectedWorkOrderId?: string,
 ): Promise<void> {
   await openProductSection(page, "Work orders");
-  const row = page.getByRole("button", { name: rowName, exact: true });
+  const row =
+    expectedWorkOrderId === undefined
+      ? page.getByRole("button", { name: rowName, exact: true })
+      : page.locator(
+          `button.work-order-row-button[data-work-order-id="${expectedWorkOrderId}"]`,
+        );
   await expect(row).toBeVisible();
+  await expect(row).toHaveAccessibleName(rowName);
   await activateWithKeyboard(row);
   await expect(
     page.getByRole("heading", {
@@ -80,6 +87,11 @@ async function openCurrentWorkOrder(
   await expect(
     page.locator('[aria-labelledby="work-order-detail-title"]'),
   ).toBeFocused();
+  if (expectedWorkOrderId !== undefined) {
+    await expect(workOrderFact(page, "Work order")).toHaveText(
+      expectedWorkOrderId,
+    );
+  }
 }
 
 test.describe("AssetPulse v0.6 product journeys", () => {
@@ -655,11 +667,11 @@ test.describe("AssetPulse v0.6 product journeys", () => {
       await activateWithKeyboard(
         winner.getByRole("button", { name: "Back to work orders" }),
       );
-      const doneRow = winner.getByRole("button", {
-        name: WORK_ORDER_ROW_NAMES.done,
-        exact: true,
-      });
+      const doneRow = winner.locator(
+        `button.work-order-row-button[data-work-order-id="${workOrderId}"]`,
+      );
       await expect(doneRow).toBeVisible();
+      await expect(doneRow).toHaveAccessibleName(WORK_ORDER_ROW_NAMES.done);
       await expect(doneRow).toBeFocused();
     } finally {
       try {
@@ -699,7 +711,11 @@ test.describe("AssetPulse v0.6 product journeys", () => {
         "completed incident dashboard",
       );
 
-      await openCurrentWorkOrder(administrator.page, WORK_ORDER_ROW_NAMES.done);
+      await openCurrentWorkOrder(
+        administrator.page,
+        WORK_ORDER_ROW_NAMES.done,
+        workOrderId,
+      );
       await expect(workOrderFact(administrator.page, "Version")).toHaveText(
         "3",
       );
