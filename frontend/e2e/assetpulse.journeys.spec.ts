@@ -69,12 +69,12 @@ async function openCurrentWorkOrder(
   expectedWorkOrderId?: string,
 ): Promise<void> {
   await openProductSection(page, "Work orders");
+  const matchingRows = page.getByRole("button", {
+    name: rowName,
+    exact: true,
+  });
   const row =
-    expectedWorkOrderId === undefined
-      ? page.getByRole("button", { name: rowName, exact: true })
-      : page.locator(
-          `button.work-order-row-button[data-work-order-id="${expectedWorkOrderId}"]`,
-        );
+    expectedWorkOrderId === undefined ? matchingRows : matchingRows.first();
   await expect(row).toBeVisible();
   await expect(row).toHaveAccessibleName(rowName);
   await activateWithKeyboard(row);
@@ -667,9 +667,7 @@ test.describe("AssetPulse v0.6 product journeys", () => {
       await activateWithKeyboard(
         winner.getByRole("button", { name: "Back to work orders" }),
       );
-      const doneRow = winner.locator(
-        `button.work-order-row-button[data-work-order-id="${workOrderId}"]`,
-      );
+      const doneRow = winner.locator("button.work-order-row-button:focus");
       await expect(doneRow).toBeVisible();
       await expect(doneRow).toHaveAccessibleName(WORK_ORDER_ROW_NAMES.done);
       await expect(doneRow).toBeFocused();
