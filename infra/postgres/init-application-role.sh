@@ -10,9 +10,40 @@ PGPASSWORD="${PGPASSWORD:-${POSTGRES_PASSWORD:-}}"
 PGCONNECT_TIMEOUT="${PGCONNECT_TIMEOUT:-5}"
 ASSETPULSE_DB_READY_ATTEMPTS="${ASSETPULSE_DB_READY_ATTEMPTS:-30}"
 ASSETPULSE_DB_READY_INTERVAL_SECONDS="${ASSETPULSE_DB_READY_INTERVAL_SECONDS:-2}"
+ASSETPULSE_PASSWORD_MODE="${ASSETPULSE_PASSWORD_MODE:-client-hashed}"
 
 : "${PGUSER:?PGUSER or POSTGRES_USER is required}"
 : "${PGDATABASE:?PGDATABASE or POSTGRES_DB is required}"
+
+case "$ASSETPULSE_PASSWORD_MODE" in
+  client-hashed) ;;
+  server-hashed)
+    if [ "${PGSSLMODE:-}" != verify-full ] \
+      || [ "${PGCHANNELBINDING:-}" != require ] \
+      || [ ! -r "${PGSSLROOTCERT:-}" ] \
+      || [ -z "${PGHOST:-}" ] \
+      || [ -n "${PGSERVICE:-}${PGSERVICEFILE:-}" ]; then
+      echo "Server-hashed passwords require a direct host, verified TLS, an explicit CA file, and channel binding" >&2
+      exit 2
+    fi
+    case "$PGDATABASE" in
+      *=*|postgres://*|postgresql://*)
+        echo "Server-hashed passwords require a database name, not a connection string" >&2
+        exit 2
+        ;;
+    esac
+    case "$PGHOST" in
+      *[!a-zA-Z0-9.:-]*)
+        echo "Server-hashed passwords require one network host" >&2
+        exit 2
+        ;;
+    esac
+    ;;
+  *)
+    echo "ASSETPULSE_PASSWORD_MODE must be client-hashed or server-hashed" >&2
+    exit 2
+    ;;
+esac
 
 case "$PGCONNECT_TIMEOUT" in
   ''|*[!0-9]*)
@@ -77,6 +108,18 @@ bootstrap_database_user="$(
 if [ "$ASSETPULSE_APP_USERNAME" = "$bootstrap_database_user" ]; then
   echo "Application role must differ from the bootstrap administrator" >&2
   exit 3
+fi
+
+if [ "$ASSETPULSE_PASSWORD_MODE" = server-hashed ]; then
+  bootstrap_connection="$(LC_ALL=C psql --no-password --no-psqlrc \
+    --set=ON_ERROR_STOP=1 --command='\conninfo')"
+  case "$bootstrap_connection" in
+    *'SSL connection (protocol:'*) ;;
+    *)
+      echo "Server-hashed passwords require an active TLS connection" >&2
+      exit 3
+      ;;
+  esac
 fi
 
 psql \
@@ -174,13 +217,28 @@ GRANT USAGE, CREATE ON SCHEMA public TO :"app_username";
 COMMIT;
 SQL
 
-printf '%s\n%s\n' "$ASSETPULSE_APP_PASSWORD" "$ASSETPULSE_APP_PASSWORD" \
-  | psql \
-    --no-password \
-    --no-psqlrc \
-    --set=ON_ERROR_STOP=1 \
-    --set=app_username="$ASSETPULSE_APP_USERNAME" \
-    --command='\password :"app_username"'
+if [ "$ASSETPULSE_PASSWORD_MODE" = server-hashed ]; then
+  # Neon requires the password value over TLS rather than a client-side verifier.
+  if ! psql --no-password --no-psqlrc --set=ON_ERROR_STOP=1 \
+    --set=ECHO=none --set=ECHO_HIDDEN=off --set=VERBOSITY=terse \
+    --set=SHOW_CONTEXT=never >/dev/null 2>&1 <<'SQL'
+\getenv app_username ASSETPULSE_APP_USERNAME
+\getenv app_password ASSETPULSE_APP_PASSWORD
+ALTER ROLE :"app_username" PASSWORD :'app_password';
+SQL
+  then
+    echo "Application password could not be set over verified TLS" >&2
+    exit 1
+  fi
+else
+  printf '%s\n%s\n' "$ASSETPULSE_APP_PASSWORD" "$ASSETPULSE_APP_PASSWORD" \
+    | psql \
+      --no-password \
+      --no-psqlrc \
+      --set=ON_ERROR_STOP=1 \
+      --set=app_username="$ASSETPULSE_APP_USERNAME" \
+      --command='\password :"app_username"'
+fi
 
 psql \
   --no-password \

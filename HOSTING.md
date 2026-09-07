@@ -53,6 +53,8 @@ Before `v0.7` can close:
 
 1. Recheck that both selected plans still require no card, subscription, paid trial, or automatic billing.
 2. Create a Neon Free project and a SQL-created least-privilege application role.
+   Set `ASSETPULSE_PASSWORD_MODE=server-hashed` for the bootstrap: Neon requires
+   the password value over verified TLS instead of psql's client-hashed verifier.
 3. Store the following only in Render's secret settings:
    - `SPRING_DATASOURCE_URL`, using the direct Neon endpoint and `sslmode=verify-full&sslrootcert=/etc/ssl/certs/ca-certificates.crt&channelBinding=require`;
    - `SPRING_DATASOURCE_USERNAME`;

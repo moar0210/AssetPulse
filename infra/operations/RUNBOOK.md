@@ -19,12 +19,17 @@ passes against its recorded source revision.
    `infra/postgres/Dockerfile.bootstrap`. The owner supplies the administrator
    connection and a new application password privately. Pass `PGHOST`, `PGPORT`,
    `PGDATABASE`, `PGUSER`, `PGPASSWORD`, `PGSSLMODE=verify-full`,
-   `PGCHANNELBINDING=require`, `ASSETPULSE_APP_USERNAME`, and
+   `PGCHANNELBINDING=require`, `ASSETPULSE_PASSWORD_MODE=server-hashed`, `ASSETPULSE_APP_USERNAME`, and
    `ASSETPULSE_APP_PASSWORD` as environment variables. The bootstrap rejects an
    administrator-role collision and privileged role memberships. Never use the
    Neon owner role as the application login. The image installs the distribution
    CA bundle and sets `PGSSLROOTCERT=/etc/ssl/certs/ca-certificates.crt`; preserve
    that trust path with `PGSSLMODE=verify-full` and required channel binding.
+   Neon rejects the pre-hashed password sent by psql's default password command.
+   The explicit `server-hashed` mode sends the password value only over verified
+   TLS for Neon to hash; client output from that statement is suppressed. Use a
+   database name rather than a connection string, and leave `PGSERVICE` and
+   `PGSERVICEFILE` unset. Local Compose retains the default `client-hashed` mode.
 5. Create the Render Blueprint from `render.yaml`. It selects one Free Docker
    service in Frankfurt, `main`, and deployment after checks pass. The owner enters
    only the application values in Render's secret settings:

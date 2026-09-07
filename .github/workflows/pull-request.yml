@@ -150,6 +150,9 @@ jobs:
       - name: Validate Compose configuration
         run: docker compose config --quiet
 
+      - name: Verify bootstrap transport and password output boundaries
+        run: bash infra/smoke/database-bootstrap.sh
+
       - name: Build runtime images
         run: docker compose build
 

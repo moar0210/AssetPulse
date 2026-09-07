@@ -6,7 +6,7 @@ bootstrap_image="${ASSETPULSE_BOOTSTRAP_IMAGE:-assetpulse-database-bootstrap:loc
 fixture_name="assetpulse-database-tls-$$"
 fixture_dir="$(mktemp -d "${TMPDIR:-/tmp}/assetpulse-database-tls.XXXXXX")"
 bundle_path=/etc/ssl/certs/ca-certificates.crt
-fixture_password=ci-only-tls-password
+fixture_password="ci-only-tls-password'\\ spaced"
 
 cleanup() {
   docker rm --force "$fixture_name" >/dev/null 2>&1 || true
@@ -71,12 +71,15 @@ if [ "$database_ready" != true ]; then
   exit 1
 fi
 
-docker run --rm --network "$fixture_name" \
-  --mount "type=bind,src=$fixture_dir/ca.crt,dst=$bundle_path,readonly" \
-  --env PGHOST=database-tls --env PGDATABASE=assetpulse_tls --env PGUSER=postgres \
-  --env PGPASSWORD="$fixture_password" --env PGSSLMODE=verify-full --env PGCHANNELBINDING=require \
-  --env ASSETPULSE_APP_USERNAME=assetpulse_tls --env ASSETPULSE_APP_PASSWORD="$fixture_password" \
-  "$bootstrap_image"
+for attempt in 1 2; do
+  docker run --rm --network "$fixture_name" \
+    --mount "type=bind,src=$fixture_dir/ca.crt,dst=$bundle_path,readonly" \
+    --env PGHOST=database-tls --env PGDATABASE=assetpulse_tls --env PGUSER=postgres \
+    --env PGPASSWORD="$fixture_password" --env PGSSLMODE=verify-full --env PGCHANNELBINDING=require \
+    --env ASSETPULSE_PASSWORD_MODE=server-hashed \
+    --env ASSETPULSE_APP_USERNAME=assetpulse_tls --env ASSETPULSE_APP_PASSWORD="$fixture_password" \
+    "$bootstrap_image"
+done
 
 psql_check() {
   docker run --rm --network "$fixture_name" --entrypoint psql \
