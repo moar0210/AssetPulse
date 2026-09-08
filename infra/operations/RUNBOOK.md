@@ -64,6 +64,11 @@ cd frontend
 ASSETPULSE_EXPECT_SECURITY_HEADERS=true npm run test:e2e
 ```
 
+The public OpenAPI 3.1 contract is served at `/openapi.json`. The smoke command
+parses that document and verifies the exact operation inventory, security and
+role declarations, local references, and critical schema bounds before it
+creates an authenticated session.
+
 Run both simulator scenarios using the commands in `simulator/USAGE.md`. Run the
 bounded performance scenario only after browser activity has ended, following
 `infra/performance/README.md`. Save its raw summary, command, region, runtime limits,

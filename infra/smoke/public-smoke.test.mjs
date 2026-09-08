@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import http from "node:http";
 import { afterEach, test } from "node:test";
 
@@ -15,6 +16,18 @@ const RIVERSIDE_ID = "00000000-0000-0000-0000-000000000002";
 const SESSION_COOKIE =
   "Path=/; Max-Age=1800; Secure; HttpOnly; SameSite=Strict";
 const READY_EVENT_FRAME = "event:ready\ndata:{}\n\n";
+const OPENAPI_SECURITY_HEADERS = Object.freeze({
+  "Content-Security-Policy":
+    "default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+  "Permissions-Policy": "camera=(), geolocation=(), microphone=()",
+  "Referrer-Policy": "no-referrer",
+  "X-Content-Type-Options": "nosniff",
+  "X-Frame-Options": "DENY",
+});
+const OPENAPI_DOCUMENT = await readFile(
+  new URL("../../frontend/public/openapi.json", import.meta.url),
+  "utf8",
+);
 
 const IDENTITY = {
   userId: "10000000-0000-0000-0000-000000000001",
@@ -85,6 +98,9 @@ function hasCookie(request, value) {
 
 async function startMockApplication({
   leakCrossTenantAsset = false,
+  openApiBody = OPENAPI_DOCUMENT,
+  openApiCacheControl = "no-cache",
+  openApiSecurityHeaders = OPENAPI_SECURITY_HEADERS,
   readinessFailures = 0,
   sseFrames = [READY_EVENT_FRAME, READY_EVENT_FRAME],
   endSseAfterFrame = false,
@@ -93,6 +109,7 @@ async function startMockApplication({
     authenticated: false,
     healthChecks: 0,
     loginAccepted: false,
+    openApiRequest: null,
     spoofRequest: null,
     streamConnections: 0,
     handlerError: null,
@@ -116,6 +133,25 @@ async function startMockApplication({
 
       if (request.method === "GET" && url.pathname === "/api/v1/status") {
         sendJson(response, 200, { status: "available" });
+        return;
+      }
+
+      if (request.method === "GET" && url.pathname === "/openapi.json") {
+        state.openApiRequest = {
+          accept: request.headers.accept,
+          authenticated: state.authenticated,
+          cookie: request.headers.cookie ?? null,
+        };
+        const headers = {
+          "Content-Type": "application/json",
+          "Content-Length": Buffer.byteLength(openApiBody),
+          ...openApiSecurityHeaders,
+        };
+        if (openApiCacheControl !== null) {
+          headers["Cache-Control"] = openApiCacheControl;
+        }
+        response.writeHead(200, headers);
+        response.end(openApiBody);
         return;
       }
 
@@ -277,6 +313,11 @@ test("the public smoke journey succeeds and sends direct tenant spoof markers", 
   assert.equal(application.state.handlerError, null);
   assert.equal(application.state.healthChecks, 2);
   assert.equal(application.state.loginAccepted, true);
+  assert.deepEqual(application.state.openApiRequest, {
+    accept: "application/json",
+    authenticated: false,
+    cookie: null,
+  });
   assert.equal(application.state.streamConnections, 2);
   assert.deepEqual(application.state.spoofRequest, {
     organisationId: RIVERSIDE_ID,
@@ -291,6 +332,7 @@ test("the public smoke journey succeeds and sends direct tenant spoof markers", 
   });
   assert.deepEqual(result.checks, [
     "readiness-and-public-endpoints",
+    "public-openapi-contract",
     "csrf-and-secure-session-cookie",
     "seeded-northstar-login",
     "authenticated-csrf-rotation",
@@ -299,6 +341,94 @@ test("the public smoke journey succeeds and sends direct tenant spoof markers", 
     "logout",
     "post-logout-assets-denied",
   ]);
+});
+
+test("the public smoke rejects malformed OpenAPI JSON", async () => {
+  const application = await startMockApplication({ openApiBody: "{" });
+
+  await assert.rejects(
+    runPublicSmoke({
+      baseUrl: application.baseUrl,
+      allowHttp: true,
+      readinessTimeoutMs: 1_000,
+      readinessIntervalMs: 10,
+      requestTimeoutMs: 1_000,
+    }),
+    (error) =>
+      error instanceof SmokeVerificationError &&
+      error.check === "public-openapi-contract" &&
+      /valid JSON response body/u.test(error.message),
+  );
+});
+
+test("the public smoke rejects an incomplete OpenAPI contract", async () => {
+  const application = await startMockApplication({
+    openApiBody: JSON.stringify({
+      openapi: "3.1.0",
+      info: { title: "Incomplete", version: "1.0.0" },
+      paths: {},
+    }),
+  });
+
+  await assert.rejects(
+    runPublicSmoke({
+      baseUrl: application.baseUrl,
+      allowHttp: true,
+      readinessTimeoutMs: 1_000,
+      readinessIntervalMs: 10,
+      requestTimeoutMs: 1_000,
+    }),
+    (error) =>
+      error instanceof SmokeVerificationError &&
+      error.check === "public-openapi-contract" &&
+      /failed OpenAPI contract validation/u.test(error.message),
+  );
+});
+
+test("the public smoke rejects unsafe OpenAPI cache policies", async () => {
+  for (const openApiCacheControl of [
+    null,
+    "public, max-age=31536000, immutable",
+  ]) {
+    const application = await startMockApplication({ openApiCacheControl });
+
+    await assert.rejects(
+      runPublicSmoke({
+        baseUrl: application.baseUrl,
+        allowHttp: true,
+        readinessTimeoutMs: 1_000,
+        readinessIntervalMs: 10,
+        requestTimeoutMs: 1_000,
+      }),
+      (error) =>
+        error instanceof SmokeVerificationError &&
+        error.check === "public-openapi-contract" &&
+        /Cache-Control to include no-store or no-cache/u.test(error.message),
+    );
+  }
+});
+
+test("the public smoke rejects missing OpenAPI static security headers", async () => {
+  const application = await startMockApplication({
+    openApiSecurityHeaders: {
+      ...OPENAPI_SECURITY_HEADERS,
+      "X-Content-Type-Options": "unsafe",
+    },
+  });
+
+  await assert.rejects(
+    runPublicSmoke({
+      baseUrl: application.baseUrl,
+      allowHttp: true,
+      readinessTimeoutMs: 1_000,
+      readinessIntervalMs: 10,
+      requestTimeoutMs: 1_000,
+    }),
+    (error) =>
+      error instanceof SmokeVerificationError &&
+      error.check === "public-openapi-contract" &&
+      /expected x-content-type-options: nosniff/u.test(error.message),
+  );
 });
 
 test("the public smoke journey fails on a Riverside cross-tenant leak", async () => {

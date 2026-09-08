@@ -1,11 +1,21 @@
 import process from "node:process";
 import { pathToFileURL } from "node:url";
 
+import { parseAndValidateOpenApiDocument } from "./openapi-contract.mjs";
+
 const HEALTH_BODY = "healthy\n";
 const STATUS_BODY = '{"status":"available"}';
 const JSON_MEDIA_TYPE = "application/json";
 const EVENT_STREAM_MEDIA_TYPE = "text/event-stream";
 const STRICT_TRANSPORT_SECURITY = "max-age=31536000; includeSubDomains";
+const OPENAPI_STATIC_SECURITY_HEADERS = Object.freeze({
+  "content-security-policy":
+    "default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+  "permissions-policy": "camera=(), geolocation=(), microphone=()",
+  "referrer-policy": "no-referrer",
+  "x-content-type-options": "nosniff",
+  "x-frame-options": "DENY",
+});
 const READY_EVENT_FRAME = "event:ready\ndata:{}\n\n";
 const MAX_SSE_FRAME_CHARACTERS = 4_096;
 const SESSION_COOKIE = "ASSETPULSE_SESSION";
@@ -102,6 +112,29 @@ function assertNoStore(response, check) {
     response.headers.get("cache-control")?.trim().toLowerCase() !== "no-store"
   ) {
     fail(check, "expected Cache-Control: no-store");
+  }
+}
+
+function assertSafePublicCachePolicy(response, check) {
+  const directives = response.headers
+    .get("cache-control")
+    ?.split(",")
+    .map((directive) => directive.split("=", 1)[0].trim().toLowerCase())
+    .filter(Boolean);
+
+  if (!directives?.includes("no-store") && !directives?.includes("no-cache")) {
+    fail(check, "expected Cache-Control to include no-store or no-cache");
+  }
+}
+
+function assertOpenApiStaticSecurityHeaders(response, check) {
+  for (const [name, expected] of Object.entries(
+    OPENAPI_STATIC_SECURITY_HEADERS,
+  )) {
+    const actual = response.headers.get(name)?.trim();
+    if (actual !== expected) {
+      fail(check, `expected ${name}: ${expected}`);
+    }
   }
 }
 
@@ -513,6 +546,43 @@ async function readJson(
   }
 }
 
+async function verifyPublicOpenApiContract(
+  baseUrl,
+  fetchImpl,
+  requestTimeoutMs,
+) {
+  const check = "public-openapi-contract";
+  const { response } = await fetchResponse(
+    fetchImpl,
+    `${baseUrl}/openapi.json`,
+    {
+      check,
+      requestTimeoutMs,
+      method: "GET",
+      headers: { Accept: JSON_MEDIA_TYPE },
+    },
+  );
+  assertStatus(response, 200, check);
+  assertMediaType(response, JSON_MEDIA_TYPE, check);
+  assertSafePublicCachePolicy(response, check);
+  assertOpenApiStaticSecurityHeaders(response, check);
+  assertStrictTransportSecurity(response, baseUrl, `${check}-hsts`);
+
+  let rawDocument;
+  try {
+    rawDocument = await response.text();
+    JSON.parse(rawDocument);
+  } catch (cause) {
+    fail(check, "expected a valid JSON response body", { cause });
+  }
+
+  try {
+    parseAndValidateOpenApiDocument(rawDocument);
+  } catch (cause) {
+    fail(check, "response failed OpenAPI contract validation", { cause });
+  }
+}
+
 function assertCsrfPayload(payload, check) {
   if (
     !exactKeys(payload, ["headerName", "token"]) ||
@@ -726,6 +796,13 @@ export async function runPublicSmoke({
     sleep,
   });
   complete("readiness-and-public-endpoints");
+
+  await verifyPublicOpenApiContract(
+    normalizedBaseUrl,
+    fetchImpl,
+    requestTimeoutMs,
+  );
+  complete("public-openapi-contract");
 
   const cookieJar = new CookieJar();
   const anonymousCsrf = await csrfExchange(

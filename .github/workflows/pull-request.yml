@@ -73,9 +73,12 @@ jobs:
       - name: Build production bundle
         run: npm run build
 
-      - name: Test public deployment smoke verifier
+      - name: Verify OpenAPI contract and public deployment smoke verifier
         working-directory: .
-        run: node --test infra/smoke/public-smoke.test.mjs
+        run: >-
+          node --test
+          infra/smoke/openapi-contract.test.mjs
+          infra/smoke/public-smoke.test.mjs
 
   simulator:
     name: Simulator
@@ -230,6 +233,9 @@ jobs:
             assetpulse-frontend:local \
             nginx -T -c /tmp/nginx.conf 2>&1)"
           grep -F "listen 10000;" <<< "$rendered"
+          grep -F "location = /openapi.json" <<< "$rendered"
+          grep -F "expires -1;" <<< "$rendered"
+          grep -F 'try_files $uri =404;' <<< "$rendered"
           test "$(grep -c -F "proxy_pass http://127.0.0.1:8081;" <<< "$rendered")" = "2"
           test "$(grep -c -F 'proxy_set_header X-AssetPulse-Client-Address $assetpulse_client_address;' <<< "$rendered")" = "2"
           test "$(grep -c -F 'proxy_set_header X-Forwarded-For $assetpulse_client_address;' <<< "$rendered")" = "2"
@@ -253,6 +259,9 @@ jobs:
             assetpulse-web:local \
             -c 'envsubst '\''${FRONTEND_PORT} ${BACKEND_UPSTREAM}'\'' < /etc/nginx/templates/nginx.conf.template > /tmp/nginx.conf && nginx -T -c /tmp/nginx.conf 2>&1')"
           grep -F "listen 10000;" <<< "$rendered"
+          grep -F "location = /openapi.json" <<< "$rendered"
+          grep -F "expires -1;" <<< "$rendered"
+          grep -F 'try_files $uri =404;' <<< "$rendered"
           test "$(grep -c -F "proxy_pass http://127.0.0.1:8081;" <<< "$rendered")" = "2"
           test "$(grep -c -F 'proxy_set_header X-AssetPulse-Client-Address $assetpulse_client_address;' <<< "$rendered")" = "2"
           test "$(grep -c -F 'proxy_set_header X-Forwarded-For $assetpulse_client_address;' <<< "$rendered")" = "2"
