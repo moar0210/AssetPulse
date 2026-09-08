@@ -1,0 +1,2861 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "AssetPulse Lite API",
+    "version": "1.0.0-rc.1",
+    "description": "The implemented same-origin API for the AssetPulse Lite demonstration. Organisation, user, and role scope always come from the server-managed session; request input cannot select a tenant or elevate a role.",
+    "license": {
+      "name": "MIT",
+      "identifier": "MIT"
+    }
+  },
+  "servers": [
+    {
+      "url": "/",
+      "description": "Current same-origin deployment"
+    }
+  ],
+  "tags": [
+    {
+      "name": "Status",
+      "description": "Public process availability."
+    },
+    {
+      "name": "Session",
+      "description": "Session authentication, CSRF bootstrap, and logout."
+    },
+    {
+      "name": "Dashboard",
+      "description": "Tenant-scoped operational summary."
+    },
+    {
+      "name": "Assets",
+      "description": "Read-only asset, sensor, and threshold configuration."
+    },
+    {
+      "name": "Telemetry",
+      "description": "Bounded telemetry ingestion and reads."
+    },
+    {
+      "name": "Alerts",
+      "description": "Alert queries, lifecycle commands, and live invalidation."
+    },
+    {
+      "name": "Work orders",
+      "description": "Assigned maintenance work and optimistic transitions."
+    },
+    {
+      "name": "Audit",
+      "description": "Bounded immutable organisation audit trail."
+    },
+    {
+      "name": "Operations",
+      "description": "Dead processing-event inspection and recovery."
+    },
+    {
+      "name": "Demo",
+      "description": "Bounded legal reset of active demonstration state."
+    }
+  ],
+  "paths": {
+    "/api/v1/status": {
+      "get": {
+        "operationId": "getStatus",
+        "summary": "Read process availability",
+        "tags": ["Status"],
+        "security": [],
+        "x-assetpulse-roles": [],
+        "responses": {
+          "200": {
+            "description": "The HTTP process is available. This is not a database-readiness claim.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatusResponse"
+                }
+              }
+            },
+            "headers": {
+              "X-Correlation-ID": {
+                "$ref": "#/components/headers/CorrelationId"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/session/csrf": {
+      "get": {
+        "operationId": "getCsrfToken",
+        "summary": "Bootstrap a session-bound CSRF token",
+        "description": "Creates or reuses the anonymous session cookie and returns the in-memory header token required by mutations.",
+        "tags": ["Session"],
+        "security": [],
+        "x-assetpulse-roles": [],
+        "responses": {
+          "200": {
+            "description": "CSRF token and required header name.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControlNoStore"
+              },
+              "X-Correlation-ID": {
+                "$ref": "#/components/headers/CorrelationId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CsrfTokenResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/session": {
+      "get": {
+        "operationId": "getCurrentSession",
+        "summary": "Read the authenticated session",
+        "tags": ["Session"],
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "x-assetpulse-roles": ["OPERATIONS_ADMIN", "TECHNICIAN", "VIEWER"],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionCookie"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Trusted authenticated identity and organisation context.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControlNoStore"
+              },
+              "X-Correlation-ID": {
+                "$ref": "#/components/headers/CorrelationId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem401"
+          }
+        }
+      },
+      "post": {
+        "operationId": "createSession",
+        "summary": "Sign in with a seeded account",
+        "tags": ["Session"],
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfToken": []
+          }
+        ],
+        "x-assetpulse-roles": [],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/CsrfToken"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Authenticated session and trusted identity context.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControlNoStore"
+              },
+              "X-Correlation-ID": {
+                "$ref": "#/components/headers/CorrelationId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem403"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem409"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem429"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem503"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteSession",
+        "summary": "Sign out and invalidate the session",
+        "description": "Implemented by the Spring Security logout filter. The session cookie is cleared even though no controller method owns this route.",
+        "tags": ["Session"],
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfToken": []
+          }
+        ],
+        "x-assetpulse-roles": [],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/CsrfToken"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Session invalidated and cookie cleared.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControlNoStore"
+              },
+              "X-Correlation-ID": {
+                "$ref": "#/components/headers/CorrelationId"
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem403"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem503"
+          }
+        }
+      }
+    },
+    "/api/v1/dashboard": {
+      "get": {
+        "operationId": "getDashboard",
+        "summary": "Read the integrated dashboard",
+        "tags": ["Dashboard"],
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "x-assetpulse-roles": ["OPERATIONS_ADMIN", "TECHNICIAN", "VIEWER"],
+        "x-assetpulse-tenant-scope": "trusted-session-organisation",
+        "responses": {
+          "200": {
+            "description": "Tenant-scoped counts and recent activity.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControlNoStore"
+              },
+              "X-Correlation-ID": {
+                "$ref": "#/components/headers/CorrelationId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DashboardResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem403"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem503"
+          }
+        }
+      }
+    },
+    "/api/v1/demo/reset": {
+      "post": {
+        "operationId": "resetDemo",
+        "summary": "Complete bounded active demo state",
+        "description": "Legally completes at most 100 active alerts and work orders. Telemetry, history, audit, and cooldown records are preserved.",
+        "tags": ["Demo"],
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfToken": []
+          }
+        ],
+        "x-assetpulse-roles": ["OPERATIONS_ADMIN"],
+        "x-assetpulse-tenant-scope": "trusted-session-organisation",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/CsrfToken"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Reset summary.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControlNoStore"
+              },
+              "X-Correlation-ID": {
+                "$ref": "#/components/headers/CorrelationId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DemoResetResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem403"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem409"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem503"
+          }
+        }
+      }
+    },
+    "/api/v1/audit-events": {
+      "get": {
+        "operationId": "listAuditEvents",
+        "summary": "List recent audit events",
+        "tags": ["Audit"],
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "x-assetpulse-roles": ["OPERATIONS_ADMIN"],
+        "x-assetpulse-tenant-scope": "trusted-session-organisation",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ListLimit"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Bounded newest-first organisation audit events.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControlNoStore"
+              },
+              "X-Correlation-ID": {
+                "$ref": "#/components/headers/CorrelationId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditListResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem403"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem503"
+          }
+        }
+      }
+    },
+    "/api/v1/assets": {
+      "get": {
+        "operationId": "listAssets",
+        "summary": "List accessible assets",
+        "tags": ["Assets"],
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "x-assetpulse-roles": ["OPERATIONS_ADMIN", "TECHNICIAN", "VIEWER"],
+        "x-assetpulse-tenant-scope": "trusted-session-organisation",
+        "responses": {
+          "200": {
+            "description": "At most 100 tenant-owned asset summaries.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControlNoStore"
+              },
+              "X-Correlation-ID": {
+                "$ref": "#/components/headers/CorrelationId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AssetListResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem403"
+          }
+        }
+      }
+    },
+    "/api/v1/assets/{assetId}": {
+      "get": {
+        "operationId": "getAsset",
+        "summary": "Read an asset with sensors and threshold rules",
+        "tags": ["Assets"],
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "x-assetpulse-roles": ["OPERATIONS_ADMIN", "TECHNICIAN", "VIEWER"],
+        "x-assetpulse-tenant-scope": "trusted-session-organisation",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/AssetId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Tenant-owned asset detail.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControlNoStore"
+              },
+              "X-Correlation-ID": {
+                "$ref": "#/components/headers/CorrelationId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AssetDetailResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem404"
+          }
+        }
+      }
+    },
+    "/api/v1/sensors/{sensorId}/telemetry-readings": {
+      "get": {
+        "operationId": "listTelemetryReadings",
+        "summary": "Read a bounded sensor time range",
+        "description": "The half-open request window must be positive and no longer than 24 hours.",
+        "tags": ["Telemetry"],
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "x-assetpulse-roles": ["OPERATIONS_ADMIN", "TECHNICIAN", "VIEWER"],
+        "x-assetpulse-tenant-scope": "trusted-session-organisation",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SensorId"
+          },
+          {
+            "$ref": "#/components/parameters/RangeFrom"
+          },
+          {
+            "$ref": "#/components/parameters/RangeTo"
+          },
+          {
+            "$ref": "#/components/parameters/TelemetryLimit"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Chronological readings in the requested range.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControlNoStore"
+              },
+              "X-Correlation-ID": {
+                "$ref": "#/components/headers/CorrelationId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TelemetryReadingRangeResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem404"
+          }
+        }
+      }
+    },
+    "/api/v1/telemetry-batches": {
+      "post": {
+        "operationId": "createTelemetryBatch",
+        "summary": "Accept an atomic idempotent telemetry batch",
+        "description": "Exact replay returns the original result. Reusing the key for different readings conflicts; one invalid reading rejects the entire batch.",
+        "tags": ["Telemetry"],
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfToken": []
+          }
+        ],
+        "x-assetpulse-roles": ["OPERATIONS_ADMIN"],
+        "x-assetpulse-tenant-scope": "trusted-session-organisation",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/CsrfToken"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TelemetryBatchRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Accepted batch, including exact-replay results.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControlNoStore"
+              },
+              "X-Correlation-ID": {
+                "$ref": "#/components/headers/CorrelationId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TelemetryBatchResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem403"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem409"
+          }
+        }
+      }
+    },
+    "/api/v1/alerts": {
+      "get": {
+        "operationId": "listAlerts",
+        "summary": "List recent alerts",
+        "tags": ["Alerts"],
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "x-assetpulse-roles": ["OPERATIONS_ADMIN", "TECHNICIAN", "VIEWER"],
+        "x-assetpulse-tenant-scope": "trusted-session-organisation",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ListLimit"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Bounded tenant-owned alerts.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControlNoStore"
+              },
+              "X-Correlation-ID": {
+                "$ref": "#/components/headers/CorrelationId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AlertListResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem403"
+          }
+        }
+      }
+    },
+    "/api/v1/alerts/stream": {
+      "get": {
+        "operationId": "streamAlertChanges",
+        "summary": "Subscribe to alert invalidation events",
+        "description": "Best-effort SSE invalidation only. Clients refresh authoritative alert state after ready, change, or reconnect events.",
+        "tags": ["Alerts"],
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "x-assetpulse-roles": ["OPERATIONS_ADMIN", "TECHNICIAN", "VIEWER"],
+        "x-assetpulse-tenant-scope": "trusted-session-organisation",
+        "responses": {
+          "200": {
+            "description": "A ready event followed by zero or more alert-changed events.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControlNoStore"
+              },
+              "X-Correlation-ID": {
+                "$ref": "#/components/headers/CorrelationId"
+              },
+              "X-Accel-Buffering": {
+                "description": "Disables reverse-proxy buffering for the event stream.",
+                "schema": {
+                  "type": "string",
+                  "const": "no"
+                }
+              }
+            },
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string",
+                  "description": "UTF-8 Server-Sent Event frames."
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem403"
+          }
+        },
+        "x-assetpulse-sse-events": {
+          "ready": "#/components/schemas/AlertStreamReadyEvent",
+          "alert-changed": "#/components/schemas/AlertStreamChangedEvent"
+        }
+      }
+    },
+    "/api/v1/alerts/{alertId}": {
+      "get": {
+        "operationId": "getAlert",
+        "summary": "Read alert detail and history",
+        "tags": ["Alerts"],
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "x-assetpulse-roles": ["OPERATIONS_ADMIN", "TECHNICIAN", "VIEWER"],
+        "x-assetpulse-tenant-scope": "trusted-session-organisation",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/AlertId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Tenant-owned alert detail.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControlNoStore"
+              },
+              "X-Correlation-ID": {
+                "$ref": "#/components/headers/CorrelationId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AlertDetailResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem404"
+          }
+        }
+      }
+    },
+    "/api/v1/alerts/{alertId}/acknowledge": {
+      "post": {
+        "operationId": "acknowledgeAlert",
+        "summary": "Acknowledge an open alert",
+        "tags": ["Alerts"],
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfToken": []
+          }
+        ],
+        "x-assetpulse-roles": ["OPERATIONS_ADMIN"],
+        "x-assetpulse-tenant-scope": "trusted-session-organisation",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/AlertId"
+          },
+          {
+            "$ref": "#/components/parameters/CsrfToken"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Updated alert and immutable history.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControlNoStore"
+              },
+              "X-Correlation-ID": {
+                "$ref": "#/components/headers/CorrelationId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AlertDetailResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem404"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem409"
+          }
+        }
+      }
+    },
+    "/api/v1/alerts/{alertId}/resolve": {
+      "post": {
+        "operationId": "resolveAlert",
+        "summary": "Resolve an acknowledged alert",
+        "tags": ["Alerts"],
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfToken": []
+          }
+        ],
+        "x-assetpulse-roles": ["OPERATIONS_ADMIN"],
+        "x-assetpulse-tenant-scope": "trusted-session-organisation",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/AlertId"
+          },
+          {
+            "$ref": "#/components/parameters/CsrfToken"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Updated alert and immutable history.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControlNoStore"
+              },
+              "X-Correlation-ID": {
+                "$ref": "#/components/headers/CorrelationId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AlertDetailResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem404"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem409"
+          }
+        }
+      }
+    },
+    "/api/v1/work-orders": {
+      "get": {
+        "operationId": "listWorkOrders",
+        "summary": "List accessible work orders",
+        "description": "Technicians receive only their assigned work; administrators and viewers receive organisation-scoped work.",
+        "tags": ["Work orders"],
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "x-assetpulse-roles": ["OPERATIONS_ADMIN", "TECHNICIAN", "VIEWER"],
+        "x-assetpulse-tenant-scope": "trusted-session-organisation",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ListLimit"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Bounded role-filtered work orders.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControlNoStore"
+              },
+              "X-Correlation-ID": {
+                "$ref": "#/components/headers/CorrelationId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkOrderListResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem403"
+          }
+        }
+      },
+      "post": {
+        "operationId": "createWorkOrder",
+        "summary": "Create a work order from an alert",
+        "tags": ["Work orders"],
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfToken": []
+          }
+        ],
+        "x-assetpulse-roles": ["OPERATIONS_ADMIN"],
+        "x-assetpulse-tenant-scope": "trusted-session-organisation",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/CsrfToken"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateWorkOrderRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created work order with a Location header.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControlNoStore"
+              },
+              "X-Correlation-ID": {
+                "$ref": "#/components/headers/CorrelationId"
+              },
+              "Location": {
+                "description": "Same-origin URL of the created work order.",
+                "schema": {
+                  "type": "string",
+                  "format": "uri-reference",
+                  "pattern": "^/api/v1/work-orders/[0-9a-f-]{36}$"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkOrderDetailResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem404"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem409"
+          }
+        }
+      }
+    },
+    "/api/v1/work-orders/eligible-technicians": {
+      "get": {
+        "operationId": "listEligibleTechnicians",
+        "summary": "List assignable technicians",
+        "tags": ["Work orders"],
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "x-assetpulse-roles": ["OPERATIONS_ADMIN"],
+        "x-assetpulse-tenant-scope": "trusted-session-organisation",
+        "responses": {
+          "200": {
+            "description": "Technicians in the authenticated organisation.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControlNoStore"
+              },
+              "X-Correlation-ID": {
+                "$ref": "#/components/headers/CorrelationId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EligibleTechnicianListResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem403"
+          }
+        }
+      }
+    },
+    "/api/v1/work-orders/{workOrderId}": {
+      "get": {
+        "operationId": "getWorkOrder",
+        "summary": "Read work-order detail and history",
+        "tags": ["Work orders"],
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "x-assetpulse-roles": ["OPERATIONS_ADMIN", "TECHNICIAN", "VIEWER"],
+        "x-assetpulse-tenant-scope": "trusted-session-organisation",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/WorkOrderId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Role-accessible work-order detail.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControlNoStore"
+              },
+              "X-Correlation-ID": {
+                "$ref": "#/components/headers/CorrelationId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkOrderDetailResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem404"
+          }
+        }
+      }
+    },
+    "/api/v1/work-orders/{workOrderId}/assign": {
+      "post": {
+        "operationId": "assignWorkOrder",
+        "summary": "Assign an open work order",
+        "tags": ["Work orders"],
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfToken": []
+          }
+        ],
+        "x-assetpulse-roles": ["OPERATIONS_ADMIN"],
+        "x-assetpulse-tenant-scope": "trusted-session-organisation",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/WorkOrderId"
+          },
+          {
+            "$ref": "#/components/parameters/CsrfToken"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssignWorkOrderRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Authoritative work-order detail after assignment.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControlNoStore"
+              },
+              "X-Correlation-ID": {
+                "$ref": "#/components/headers/CorrelationId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkOrderDetailResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem404"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem409"
+          }
+        }
+      }
+    },
+    "/api/v1/work-orders/{workOrderId}/start": {
+      "post": {
+        "operationId": "startWorkOrder",
+        "summary": "Start assigned work",
+        "tags": ["Work orders"],
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfToken": []
+          }
+        ],
+        "x-assetpulse-roles": ["TECHNICIAN"],
+        "x-assetpulse-tenant-scope": "trusted-session-organisation",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/WorkOrderId"
+          },
+          {
+            "$ref": "#/components/parameters/CsrfToken"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TransitionWorkOrderRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Authoritative in-progress work order.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControlNoStore"
+              },
+              "X-Correlation-ID": {
+                "$ref": "#/components/headers/CorrelationId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkOrderDetailResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem404"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem409"
+          }
+        }
+      }
+    },
+    "/api/v1/work-orders/{workOrderId}/complete": {
+      "post": {
+        "operationId": "completeWorkOrder",
+        "summary": "Complete in-progress work",
+        "tags": ["Work orders"],
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfToken": []
+          }
+        ],
+        "x-assetpulse-roles": ["TECHNICIAN"],
+        "x-assetpulse-tenant-scope": "trusted-session-organisation",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/WorkOrderId"
+          },
+          {
+            "$ref": "#/components/parameters/CsrfToken"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TransitionWorkOrderRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Authoritative completed work order.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControlNoStore"
+              },
+              "X-Correlation-ID": {
+                "$ref": "#/components/headers/CorrelationId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkOrderDetailResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem404"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem409"
+          }
+        }
+      }
+    },
+    "/api/v1/processing-events/dead": {
+      "get": {
+        "operationId": "listDeadProcessingEvents",
+        "summary": "List dead telemetry processing events",
+        "tags": ["Operations"],
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "x-assetpulse-roles": ["OPERATIONS_ADMIN"],
+        "x-assetpulse-tenant-scope": "trusted-session-organisation",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ListLimit"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Bounded dead-event diagnostics.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControlNoStore"
+              },
+              "X-Correlation-ID": {
+                "$ref": "#/components/headers/CorrelationId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeadProcessingEventListResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem403"
+          }
+        }
+      }
+    },
+    "/api/v1/processing-events/{eventId}/retry": {
+      "post": {
+        "operationId": "retryProcessingEvent",
+        "summary": "Retry a dead processing event",
+        "tags": ["Operations"],
+        "security": [
+          {
+            "sessionCookie": [],
+            "csrfToken": []
+          }
+        ],
+        "x-assetpulse-roles": ["OPERATIONS_ADMIN"],
+        "x-assetpulse-tenant-scope": "trusted-session-organisation",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/EventId"
+          },
+          {
+            "$ref": "#/components/parameters/CsrfToken"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Event returned to the bounded retry lifecycle.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControlNoStore"
+              },
+              "X-Correlation-ID": {
+                "$ref": "#/components/headers/CorrelationId"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem404"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem409"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "sessionCookie": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "ASSETPULSE_SESSION",
+        "description": "Server-managed HttpOnly SameSite=Strict session identifier. It carries anonymous CSRF state before login and trusted identity context after login; organisation, actor, and role are loaded from server-owned data."
+      },
+      "csrfToken": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-CSRF-TOKEN",
+        "description": "Token returned by GET /api/v1/session/csrf and tied to the current anonymous or authenticated session cookie."
+      }
+    },
+    "headers": {
+      "CacheControlNoStore": {
+        "description": "Prevents storage of session and tenant-scoped responses.",
+        "schema": {
+          "type": "string",
+          "const": "no-store",
+          "example": "no-store"
+        }
+      },
+      "CorrelationId": {
+        "description": "Server-generated request correlation identifier. Client-supplied values are ignored.",
+        "schema": {
+          "$ref": "#/components/schemas/Uuid"
+        }
+      }
+    },
+    "parameters": {
+      "SessionCookie": {
+        "name": "ASSETPULSE_SESSION",
+        "in": "cookie",
+        "required": true,
+        "description": "Authenticated server-managed session cookie.",
+        "schema": {
+          "type": "string"
+        }
+      },
+      "CsrfToken": {
+        "name": "X-CSRF-TOKEN",
+        "in": "header",
+        "required": true,
+        "description": "Session-bound mutation token from the CSRF bootstrap route.",
+        "schema": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "ListLimit": {
+        "name": "limit",
+        "in": "query",
+        "required": false,
+        "description": "Maximum results.",
+        "schema": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100,
+          "default": 50
+        }
+      },
+      "TelemetryLimit": {
+        "name": "limit",
+        "in": "query",
+        "required": false,
+        "description": "Maximum readings.",
+        "schema": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 500,
+          "default": 100
+        }
+      },
+      "RangeFrom": {
+        "name": "from",
+        "in": "query",
+        "required": true,
+        "description": "Inclusive UTC range start.",
+        "schema": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "RangeTo": {
+        "name": "to",
+        "in": "query",
+        "required": true,
+        "description": "Exclusive UTC range end, no more than 24 hours after from.",
+        "schema": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "AssetId": {
+        "name": "assetId",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "SensorId": {
+        "name": "sensorId",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "AlertId": {
+        "name": "alertId",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "WorkOrderId": {
+        "name": "workOrderId",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "EventId": {
+        "name": "eventId",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "format": "uuid"
+        }
+      }
+    },
+    "responses": {
+      "Problem400": {
+        "description": "Invalid request.",
+        "headers": {
+          "Cache-Control": {
+            "$ref": "#/components/headers/CacheControlNoStore"
+          },
+          "X-Correlation-ID": {
+            "$ref": "#/components/headers/CorrelationId"
+          }
+        },
+        "content": {
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          }
+        }
+      },
+      "Problem401": {
+        "description": "Authentication required or credentials rejected.",
+        "headers": {
+          "Cache-Control": {
+            "$ref": "#/components/headers/CacheControlNoStore"
+          },
+          "X-Correlation-ID": {
+            "$ref": "#/components/headers/CorrelationId"
+          }
+        },
+        "content": {
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          }
+        }
+      },
+      "Problem403": {
+        "description": "CSRF verification or role/ownership authorization rejected.",
+        "headers": {
+          "Cache-Control": {
+            "$ref": "#/components/headers/CacheControlNoStore"
+          },
+          "X-Correlation-ID": {
+            "$ref": "#/components/headers/CorrelationId"
+          }
+        },
+        "content": {
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          }
+        }
+      },
+      "Problem404": {
+        "description": "Resource absent or outside the trusted organisation/ownership scope.",
+        "headers": {
+          "Cache-Control": {
+            "$ref": "#/components/headers/CacheControlNoStore"
+          },
+          "X-Correlation-ID": {
+            "$ref": "#/components/headers/CorrelationId"
+          }
+        },
+        "content": {
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          }
+        }
+      },
+      "Problem409": {
+        "description": "Current state, idempotency key, duplicate, bound, or optimistic version conflict.",
+        "headers": {
+          "Cache-Control": {
+            "$ref": "#/components/headers/CacheControlNoStore"
+          },
+          "X-Correlation-ID": {
+            "$ref": "#/components/headers/CorrelationId"
+          }
+        },
+        "content": {
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          }
+        }
+      },
+      "Problem429": {
+        "description": "Bounded sign-in rate limit exceeded.",
+        "headers": {
+          "Cache-Control": {
+            "$ref": "#/components/headers/CacheControlNoStore"
+          },
+          "Retry-After": {
+            "description": "Seconds until another sign-in attempt is allowed.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "X-Correlation-ID": {
+            "$ref": "#/components/headers/CorrelationId"
+          }
+        },
+        "content": {
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          }
+        }
+      },
+      "Problem503": {
+        "description": "Required authentication, audit, dashboard, or reset persistence is unavailable.",
+        "headers": {
+          "Cache-Control": {
+            "$ref": "#/components/headers/CacheControlNoStore"
+          },
+          "X-Correlation-ID": {
+            "$ref": "#/components/headers/CorrelationId"
+          }
+        },
+        "content": {
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "Uuid": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "Instant": {
+        "type": "string",
+        "format": "date-time"
+      },
+      "RoleCode": {
+        "type": "string",
+        "enum": ["OPERATIONS_ADMIN", "TECHNICIAN", "VIEWER"]
+      },
+      "AlertStatus": {
+        "type": "string",
+        "enum": ["OPEN", "ACKNOWLEDGED", "RESOLVED"]
+      },
+      "WorkOrderStatus": {
+        "type": "string",
+        "enum": ["OPEN", "ASSIGNED", "IN_PROGRESS", "DONE"]
+      },
+      "MeasurementType": {
+        "type": "string",
+        "enum": ["TEMPERATURE"]
+      },
+      "MeasurementUnit": {
+        "type": "string",
+        "enum": ["CELSIUS"]
+      },
+      "ThresholdComparison": {
+        "type": "string",
+        "enum": ["GREATER_THAN_OR_EQUAL_TO"]
+      },
+      "AuditAction": {
+        "type": "string",
+        "enum": [
+          "AUTHENTICATION_SUCCEEDED",
+          "SESSION_ENDED",
+          "ALERT_ACKNOWLEDGED",
+          "ALERT_RESOLVED",
+          "WORK_ORDER_CREATED",
+          "WORK_ORDER_ASSIGNED",
+          "WORK_ORDER_STARTED",
+          "WORK_ORDER_COMPLETED",
+          "PROCESSING_EVENT_RETRIED",
+          "DEMO_RESET"
+        ]
+      },
+      "DashboardActivityAction": {
+        "type": "string",
+        "enum": [
+          "ALERT_ACKNOWLEDGED",
+          "ALERT_RESOLVED",
+          "WORK_ORDER_CREATED",
+          "WORK_ORDER_ASSIGNED",
+          "WORK_ORDER_STARTED",
+          "WORK_ORDER_COMPLETED"
+        ]
+      },
+      "AuditSubjectType": {
+        "type": "string",
+        "enum": ["USER", "ALERT", "WORK_ORDER", "PROCESSING_EVENT"]
+      },
+      "DashboardSubjectType": {
+        "type": "string",
+        "enum": ["ALERT", "WORK_ORDER"]
+      },
+      "Problem": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": [
+          "type",
+          "title",
+          "status",
+          "detail",
+          "instance",
+          "code",
+          "correlationId"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "format": "uri-reference"
+          },
+          "title": {
+            "type": "string"
+          },
+          "status": {
+            "type": "integer",
+            "minimum": 100,
+            "maximum": 599
+          },
+          "detail": {
+            "type": "string"
+          },
+          "instance": {
+            "type": "string",
+            "format": "uri-reference"
+          },
+          "code": {
+            "type": "string",
+            "pattern": "^[A-Z][A-Z0-9_]*$"
+          },
+          "correlationId": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "fieldErrors": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "StatusResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["status"],
+        "properties": {
+          "status": {
+            "type": "string",
+            "const": "available"
+          }
+        }
+      },
+      "CsrfTokenResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["headerName", "token"],
+        "properties": {
+          "headerName": {
+            "type": "string",
+            "const": "X-CSRF-TOKEN"
+          },
+          "token": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "LoginRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["email", "password"],
+        "properties": {
+          "email": {
+            "type": "string",
+            "format": "email",
+            "minLength": 1,
+            "maxLength": 254
+          },
+          "password": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "writeOnly": true
+          }
+        }
+      },
+      "SessionResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["userId", "displayName", "email", "organisation", "role"],
+        "properties": {
+          "userId": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "displayName": {
+            "type": "string"
+          },
+          "email": {
+            "type": "string",
+            "format": "email"
+          },
+          "organisation": {
+            "$ref": "#/components/schemas/OrganisationResponse"
+          },
+          "role": {
+            "$ref": "#/components/schemas/RoleResponse"
+          }
+        }
+      },
+      "OrganisationResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "slug", "name"],
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "slug": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "RoleResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["code", "displayName"],
+        "properties": {
+          "code": {
+            "$ref": "#/components/schemas/RoleCode"
+          },
+          "displayName": {
+            "type": "string"
+          }
+        }
+      },
+      "AssetSummaryResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "assetCode", "name"],
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "assetCode": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "AssetListResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["assets"],
+        "properties": {
+          "assets": {
+            "type": "array",
+            "maxItems": 100,
+            "items": {
+              "$ref": "#/components/schemas/AssetSummaryResponse"
+            }
+          }
+        }
+      },
+      "ThresholdRuleResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "ruleCode",
+          "name",
+          "comparison",
+          "thresholdValue",
+          "cooldownSeconds",
+          "enabled"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "ruleCode": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "comparison": {
+            "$ref": "#/components/schemas/ThresholdComparison"
+          },
+          "thresholdValue": {
+            "type": "number"
+          },
+          "cooldownSeconds": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 604800
+          },
+          "enabled": {
+            "type": "boolean"
+          }
+        }
+      },
+      "SensorResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "sensorKey",
+          "name",
+          "measurementType",
+          "unit",
+          "thresholdRules"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "sensorKey": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "measurementType": {
+            "$ref": "#/components/schemas/MeasurementType"
+          },
+          "unit": {
+            "$ref": "#/components/schemas/MeasurementUnit"
+          },
+          "thresholdRules": {
+            "type": "array",
+            "maxItems": 100,
+            "items": {
+              "$ref": "#/components/schemas/ThresholdRuleResponse"
+            }
+          }
+        }
+      },
+      "AssetDetailResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "assetCode", "name", "sensors"],
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "assetCode": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "sensors": {
+            "type": "array",
+            "maxItems": 100,
+            "items": {
+              "$ref": "#/components/schemas/SensorResponse"
+            }
+          }
+        }
+      },
+      "TelemetryReadingInput": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sensorId", "value", "observedAt"],
+        "properties": {
+          "sensorId": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "value": {
+            "type": "number",
+            "minimum": -1000000000000,
+            "maximum": 1000000000000,
+            "multipleOf": 0.000001
+          },
+          "observedAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Must not be in the future."
+          }
+        }
+      },
+      "TelemetryBatchRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["idempotencyKey", "readings"],
+        "properties": {
+          "idempotencyKey": {
+            "type": "string",
+            "maxLength": 100,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$"
+          },
+          "readings": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 100,
+            "items": {
+              "$ref": "#/components/schemas/TelemetryReadingInput"
+            }
+          }
+        }
+      },
+      "TelemetryBatchResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["batchId", "idempotencyKey", "readingCount", "acceptedAt"],
+        "properties": {
+          "batchId": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "idempotencyKey": {
+            "type": "string"
+          },
+          "readingCount": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          },
+          "acceptedAt": {
+            "$ref": "#/components/schemas/Instant"
+          }
+        }
+      },
+      "TelemetryReading": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "value", "observedAt"],
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "value": {
+            "type": "number"
+          },
+          "observedAt": {
+            "$ref": "#/components/schemas/Instant"
+          }
+        }
+      },
+      "TelemetryReadingRangeResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sensorId", "from", "to", "readings"],
+        "properties": {
+          "sensorId": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "from": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "to": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "readings": {
+            "type": "array",
+            "maxItems": 500,
+            "items": {
+              "$ref": "#/components/schemas/TelemetryReading"
+            }
+          }
+        }
+      },
+      "AlertAssetContext": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "assetCode", "name"],
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "assetCode": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "AlertSensorContext": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "sensorKey", "name", "measurementType", "unit"],
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "sensorKey": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "measurementType": {
+            "$ref": "#/components/schemas/MeasurementType"
+          },
+          "unit": {
+            "$ref": "#/components/schemas/MeasurementUnit"
+          }
+        }
+      },
+      "AlertRuleContext": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "ruleCode",
+          "name",
+          "comparison",
+          "thresholdValue",
+          "cooldownSeconds"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "ruleCode": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "comparison": {
+            "$ref": "#/components/schemas/ThresholdComparison"
+          },
+          "thresholdValue": {
+            "type": "number"
+          },
+          "cooldownSeconds": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 604800
+          }
+        }
+      },
+      "AlertContextResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["asset", "sensor", "thresholdRule"],
+        "properties": {
+          "asset": {
+            "$ref": "#/components/schemas/AlertAssetContext"
+          },
+          "sensor": {
+            "$ref": "#/components/schemas/AlertSensorContext"
+          },
+          "thresholdRule": {
+            "$ref": "#/components/schemas/AlertRuleContext"
+          }
+        }
+      },
+      "AlertSummaryResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "status",
+          "occurrenceCount",
+          "lastOccurredAt",
+          "context"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "status": {
+            "$ref": "#/components/schemas/AlertStatus"
+          },
+          "occurrenceCount": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1
+          },
+          "lastOccurredAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "context": {
+            "$ref": "#/components/schemas/AlertContextResponse"
+          }
+        }
+      },
+      "AlertListResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["alerts", "limit"],
+        "properties": {
+          "alerts": {
+            "type": "array",
+            "maxItems": 100,
+            "items": {
+              "$ref": "#/components/schemas/AlertSummaryResponse"
+            }
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          }
+        }
+      },
+      "ActorResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "displayName"],
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "displayName": {
+            "type": "string"
+          }
+        }
+      },
+      "AlertHistoryResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "sequenceNumber",
+          "fromStatus",
+          "toStatus",
+          "actor",
+          "transitionedAt"
+        ],
+        "properties": {
+          "sequenceNumber": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "fromStatus": {
+            "$ref": "#/components/schemas/AlertStatus"
+          },
+          "toStatus": {
+            "$ref": "#/components/schemas/AlertStatus"
+          },
+          "actor": {
+            "$ref": "#/components/schemas/ActorResponse"
+          },
+          "transitionedAt": {
+            "$ref": "#/components/schemas/Instant"
+          }
+        }
+      },
+      "AlertDetailResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "status",
+          "occurrenceCount",
+          "firstOccurredAt",
+          "lastOccurredAt",
+          "cooldownUntil",
+          "createdAt",
+          "updatedAt",
+          "context",
+          "history"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "status": {
+            "$ref": "#/components/schemas/AlertStatus"
+          },
+          "occurrenceCount": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1
+          },
+          "firstOccurredAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "lastOccurredAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "cooldownUntil": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "createdAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "updatedAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "context": {
+            "$ref": "#/components/schemas/AlertContextResponse"
+          },
+          "history": {
+            "type": "array",
+            "maxItems": 2,
+            "items": {
+              "$ref": "#/components/schemas/AlertHistoryResponse"
+            }
+          }
+        }
+      },
+      "AlertChangeEvent": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["alertId", "changeType"],
+        "properties": {
+          "alertId": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "changeType": {
+            "type": "string",
+            "enum": ["OCCURRENCE_RECORDED", "STATUS_CHANGED"]
+          }
+        }
+      },
+      "AlertStreamReadyEvent": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["event", "data"],
+        "properties": {
+          "event": {
+            "const": "ready"
+          },
+          "data": {
+            "type": "object",
+            "additionalProperties": false,
+            "maxProperties": 0
+          }
+        }
+      },
+      "AlertStreamChangedEvent": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["event", "data"],
+        "properties": {
+          "event": {
+            "const": "alert-changed"
+          },
+          "data": {
+            "$ref": "#/components/schemas/AlertChangeEvent"
+          }
+        }
+      },
+      "AssignedTechnicianResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "displayName"],
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "displayName": {
+            "type": "string"
+          }
+        }
+      },
+      "WorkOrderContextResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["assetId", "assetCode", "assetName", "ruleName"],
+        "properties": {
+          "assetId": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "assetCode": {
+            "type": "string"
+          },
+          "assetName": {
+            "type": "string"
+          },
+          "ruleName": {
+            "type": "string"
+          }
+        }
+      },
+      "WorkOrderResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "alertId",
+          "status",
+          "version",
+          "assignedTechnician",
+          "createdAt",
+          "updatedAt",
+          "context"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "alertId": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "status": {
+            "$ref": "#/components/schemas/WorkOrderStatus"
+          },
+          "version": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "assignedTechnician": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/AssignedTechnicianResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "createdAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "updatedAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "context": {
+            "$ref": "#/components/schemas/WorkOrderContextResponse"
+          }
+        }
+      },
+      "WorkOrderHistoryResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "sequenceNumber",
+          "fromStatus",
+          "toStatus",
+          "actor",
+          "transitionedAt"
+        ],
+        "properties": {
+          "sequenceNumber": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "fromStatus": {
+            "$ref": "#/components/schemas/WorkOrderStatus"
+          },
+          "toStatus": {
+            "$ref": "#/components/schemas/WorkOrderStatus"
+          },
+          "actor": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ActorResponse"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Authenticated transition actor, or null only for a legacy assignment backfilled from pre-history data."
+          },
+          "transitionedAt": {
+            "$ref": "#/components/schemas/Instant"
+          }
+        }
+      },
+      "WorkOrderDetailResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "alertId",
+          "status",
+          "version",
+          "assignedTechnician",
+          "createdAt",
+          "updatedAt",
+          "context",
+          "history"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "alertId": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "status": {
+            "$ref": "#/components/schemas/WorkOrderStatus"
+          },
+          "version": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "assignedTechnician": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/AssignedTechnicianResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "createdAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "updatedAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "context": {
+            "$ref": "#/components/schemas/WorkOrderContextResponse"
+          },
+          "history": {
+            "type": "array",
+            "maxItems": 3,
+            "items": {
+              "$ref": "#/components/schemas/WorkOrderHistoryResponse"
+            }
+          }
+        }
+      },
+      "WorkOrderListResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["workOrders", "limit"],
+        "properties": {
+          "workOrders": {
+            "type": "array",
+            "maxItems": 100,
+            "items": {
+              "$ref": "#/components/schemas/WorkOrderResponse"
+            }
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          }
+        }
+      },
+      "CreateWorkOrderRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["alertId"],
+        "properties": {
+          "alertId": {
+            "$ref": "#/components/schemas/Uuid"
+          }
+        }
+      },
+      "AssignWorkOrderRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["technicianUserId", "expectedVersion"],
+        "properties": {
+          "technicianUserId": {
+            "$ref": "#/components/schemas/Uuid",
+            "description": "Required same-organisation technician selected from the eligible-technicians route."
+          },
+          "expectedVersion": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "TransitionWorkOrderRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["expectedVersion"],
+        "properties": {
+          "expectedVersion": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "EligibleTechnicianResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "displayName"],
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "displayName": {
+            "type": "string"
+          }
+        }
+      },
+      "EligibleTechnicianListResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["technicians"],
+        "properties": {
+          "technicians": {
+            "type": "array",
+            "maxItems": 100,
+            "items": {
+              "$ref": "#/components/schemas/EligibleTechnicianResponse"
+            }
+          }
+        }
+      },
+      "DashboardActivityResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["action", "subjectType", "subjectId", "occurredAt"],
+        "properties": {
+          "action": {
+            "$ref": "#/components/schemas/DashboardActivityAction"
+          },
+          "subjectType": {
+            "$ref": "#/components/schemas/DashboardSubjectType"
+          },
+          "subjectId": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "occurredAt": {
+            "$ref": "#/components/schemas/Instant"
+          }
+        }
+      },
+      "DashboardResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "assetCount",
+          "openAlertCount",
+          "activeWorkOrderCount",
+          "recentActivity"
+        ],
+        "properties": {
+          "assetCount": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "openAlertCount": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "activeWorkOrderCount": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "recentActivity": {
+            "type": "array",
+            "maxItems": 5,
+            "items": {
+              "$ref": "#/components/schemas/DashboardActivityResponse"
+            }
+          }
+        }
+      },
+      "AuditSubjectResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["type", "id"],
+        "properties": {
+          "type": {
+            "$ref": "#/components/schemas/AuditSubjectType"
+          },
+          "id": {
+            "$ref": "#/components/schemas/Uuid"
+          }
+        }
+      },
+      "AuditEventResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "actor",
+          "action",
+          "subject",
+          "occurredAt",
+          "correlationId"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "actor": {
+            "$ref": "#/components/schemas/ActorResponse"
+          },
+          "action": {
+            "$ref": "#/components/schemas/AuditAction"
+          },
+          "subject": {
+            "$ref": "#/components/schemas/AuditSubjectResponse"
+          },
+          "occurredAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "correlationId": {
+            "$ref": "#/components/schemas/Uuid"
+          }
+        }
+      },
+      "AuditListResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["events", "limit"],
+        "properties": {
+          "events": {
+            "type": "array",
+            "maxItems": 100,
+            "items": {
+              "$ref": "#/components/schemas/AuditEventResponse"
+            }
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          }
+        }
+      },
+      "DeadProcessingEventResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "telemetryBatchId",
+          "eventType",
+          "attemptCount",
+          "createdAt",
+          "deadAt",
+          "updatedAt",
+          "lastErrorCode",
+          "lastErrorMessage"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "telemetryBatchId": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "eventType": {
+            "type": "string",
+            "const": "TELEMETRY_BATCH_ACCEPTED"
+          },
+          "attemptCount": {
+            "type": "integer",
+            "const": 5
+          },
+          "createdAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "deadAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "updatedAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "lastErrorCode": {
+            "type": "string",
+            "maxLength": 64,
+            "enum": ["PROCESSING_FAILED", "LEASE_EXPIRED"]
+          },
+          "lastErrorMessage": {
+            "type": "string",
+            "maxLength": 256
+          }
+        }
+      },
+      "DeadProcessingEventListResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["events", "limit"],
+        "properties": {
+          "events": {
+            "type": "array",
+            "maxItems": 100,
+            "items": {
+              "$ref": "#/components/schemas/DeadProcessingEventResponse"
+            }
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          }
+        }
+      },
+      "DemoResetResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["resetAt", "alertsResolved", "workOrdersCompleted"],
+        "properties": {
+          "resetAt": {
+            "$ref": "#/components/schemas/Instant"
+          },
+          "alertsResolved": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100
+          },
+          "workOrdersCompleted": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100
+          }
+        }
+      }
+    }
+  }
+}
