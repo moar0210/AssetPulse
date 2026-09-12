@@ -1,0 +1,25 @@
+-- Captured 2026-09-07T14:24:23.4866416Z at application revision 7541f32a25763aa8439173c0e14db542f6993bbb.
+-- Organisation and sensor UUID literals are redacted; all plan measurements are unchanged.
+BEGIN
+SET
+SET
+                                                                                                                                                 QUERY PLAN
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Sort  (cost=8.19..8.19 rows=1 width=44) (actual time=0.076..0.078 rows=42 loops=1)
+   Sort Key: telemetry_reading.observed_at, telemetry_reading.id
+   Sort Method: quicksort  Memory: 26kB
+   Buffers: shared hit=8
+   ->  Limit  (cost=0.15..8.18 rows=1 width=44) (actual time=0.016..0.029 rows=42 loops=1)
+         Buffers: shared hit=2
+         ->  Index Only Scan using ix_telemetry_reading_organisation_sensor_observed_id on telemetry_reading  (cost=0.15..8.18 rows=1 width=44) (actual time=0.015..0.025 rows=42 loops=1)
+               Index Cond: ((organisation_id = '<organisation-id>'::uuid) AND (sensor_id = '<sensor-id>'::uuid) AND (observed_at >= '2026-09-07 13:00:00+00'::timestamp with time zone) AND (observed_at < '2026-09-07 15:00:00+00'::timestamp with time zone))
+               Heap Fetches: 42
+               Buffers: shared hit=2
+ Settings: effective_cache_size = '6553MB', maintenance_io_concurrency = '100', effective_io_concurrency = '128'
+ Planning:
+   Buffers: shared hit=187
+ Planning Time: 0.455 ms
+ Execution Time: 0.136 ms
+(15 rows)
+
+ROLLBACK

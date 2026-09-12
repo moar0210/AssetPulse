@@ -1,0 +1,26 @@
+﻿{
+    "target":  "https://assetpulse-rv4z.onrender.com/api/v1/status",
+    "idleStartedAt":  "2026-09-07T19:27:26.1488824+00:00",
+    "idleWaitSeconds":  1020,
+    "measuredAt":  "2026-09-07T19:46:22.1286370+00:00",
+    "firstRequest":  {
+                         "label":  "post-idle",
+                         "startedAt":  "2026-09-07T19:44:26.2877122+00:00",
+                         "completedAt":  "2026-09-07T19:46:21.8713368+00:00",
+                         "durationMs":  115508.151,
+                         "statusCode":  200,
+                         "responseStatus":  "available",
+                         "serviceVersion":  null,
+                         "error":  null
+                     },
+    "warmFollowUp":  {
+                         "label":  "immediate-follow-up",
+                         "startedAt":  "2026-09-07T19:46:21.8817122+00:00",
+                         "completedAt":  "2026-09-07T19:46:22.1286370+00:00",
+                         "durationMs":  246.138,
+                         "statusCode":  200,
+                         "responseStatus":  "available",
+                         "serviceVersion":  null,
+                         "error":  null
+                     }
+}

@@ -1,0 +1,22 @@
+{
+  "observedOnUtc": "2026-09-07",
+  "applicationRevision": "7541f32a25763aa8439173c0e14db542f6993bbb",
+  "recordType": "sanitized transcription of captured span correlation",
+  "flowId": "6eaa0fbd-afb0-470d-99b8-aaaab2822136",
+  "batchId": "fe5d05b9-3435-446e-84d7-217cfcdbed7a",
+  "traceId": "8c91e8c7aa3e99c479b58bea444633b6",
+  "acceptanceSpanId": "b6ce4edb30da473e",
+  "processingSpanId": "585435487c7fba17",
+  "processingParentSpanId": "b6ce4edb30da473e",
+  "recordedEvents": [
+    "accepted",
+    "processing_started",
+    "three_alert_records",
+    "processing_completed"
+  ],
+  "limitations": [
+    "This excerpt preserves the recorded relationship, not the complete span export.",
+    "Actor and organisation context, request bodies, and session material are omitted.",
+    "This is historical evidence for the stated revision, not a fresh run."
+  ]
+}

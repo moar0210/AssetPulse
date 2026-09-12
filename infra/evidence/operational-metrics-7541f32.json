@@ -1,0 +1,13 @@
+{
+  "observedAt": "2026-09-07T19:25:38.543683799Z",
+  "applicationRevision": "7541f32a25763aa8439173c0e14db542f6993bbb",
+  "httpRequestCount": 424,
+  "httpErrorCount": 18,
+  "httpAverageDurationMs": 2623.54269995283,
+  "httpMaxDurationMs": 14.231776,
+  "telemetryPendingCount": 0,
+  "telemetryProcessingLagSeconds": 0.0,
+  "telemetryRetryingCount": 0,
+  "telemetryDeadCount": 0,
+  "source": "Render application log event operational_metrics"
+}
