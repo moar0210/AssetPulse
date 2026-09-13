@@ -1,0 +1,37 @@
+{
+  "evidenceRecordedAt": "2026-09-12T22:01:36.3736159Z",
+  "applicationRevision": "1b0311ba7822471cf159f030b48d2ad5dac9db99",
+  "baseUrl": "https://assetpulse-rv4z.onrender.com",
+  "deploymentIdentity": "Render deployment page identified this revision as the live deployment on 2026-09-12",
+  "ciRun": "https://github.com/moar0210/AssetPulse/actions/runs/34270179665",
+  "ciConclusion": "success",
+  "publicSmoke": {
+    "sourceByteMatch": true,
+    "openApiSha256": "45acaa354eb666283ea3e352fd573e1aba4d3162475eb2b2385f450847f8e536",
+    "checksPassed": 9,
+    "command": "node infra/smoke/public-smoke.mjs --base-url https://assetpulse-rv4z.onrender.com --request-timeout-ms 30000"
+  },
+  "desktopBrowser": {
+    "testsPassed": 3,
+    "journeys": [
+      "live incident and keyboard/accessibility",
+      "organisation, role and ownership denial",
+      "two-client optimistic conflict recovery"
+    ],
+    "testsFailed": 0,
+    "initialAttempt": "The root document returned HTTP 503 before the sign-in screen loaded; two later journeys did not run. After status, root-document and smoke readiness checks, all three passed. No assertion was relaxed.",
+    "command": "ASSETPULSE_BASE_URL=https://assetpulse-rv4z.onrender.com ASSETPULSE_EXPECT_SECURITY_HEADERS=true npm run test:e2e",
+    "reportedDuration": "1.1 minutes"
+  },
+  "cleanCheckout": {
+    "revision": "1b0311ba7822471cf159f030b48d2ad5dac9db99",
+    "localContainers": "Docker Desktop startup timed out; PostgreSQL and Compose evidence comes from the linked exact-revision CI run",
+    "format": "passed",
+    "lint": "passed",
+    "typecheckAndBuild": "passed",
+    "frontendTestsPassed": 295,
+    "helpersAndSimulatorTestsPassed": 48,
+    "node": "24.19.0"
+  },
+  "scope": "Manually transcribed verification summary. Raw browser traces are private; no final-release acceptance or new performance measurement is claimed."
+}

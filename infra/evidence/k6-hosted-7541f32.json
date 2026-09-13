@@ -1,0 +1,343 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-09-07T14:21:46.608Z",
+  "scenario": "authenticated telemetry acceptance to durable alert visibility",
+  "targetOrigin": "https://assetpulse-rv4z.onrender.com",
+  "environment": {
+    "name": "render-free-frankfurt",
+    "deployRevision": "7541f32a25763aa8439173c0e14db542f6993bbb",
+    "protocol": "https:"
+  },
+  "boundedConfiguration": {
+    "vus": 1,
+    "iterations": 3,
+    "requestTimeoutSeconds": 10,
+    "alertWaitSeconds": 30,
+    "hardMaximums": {
+      "vus": 1,
+      "iterations": 20,
+      "requestTimeoutSeconds": 30,
+      "alertWaitSeconds": 60
+    }
+  },
+  "k6SummaryFormat": "legacy",
+  "expectedMetricNames": [
+    "assetpulse_scenario_success",
+    "assetpulse_scenario_failures",
+    "assetpulse_telemetry_accept_latency",
+    "assetpulse_telemetry_to_alert_latency",
+    "http_req_duration",
+    "http_req_failed",
+    "iterations"
+  ],
+  "limitations": [
+    "This bounded check is not a capacity test.",
+    "Alert visibility is verified by tenant-safe API polling, not direct database access.",
+    "A sleeping free service can add cold-start latency before the measured scenario begins."
+  ],
+  "rawK6Summary": {
+    "root_group": {
+      "name": "",
+      "path": "",
+      "id": "d41d8cd98f00b204e9800998ecf8427e",
+      "groups": [],
+      "checks": [
+          {
+            "name": "CSRF bootstrap returns HTTP 200",
+            "path": "::CSRF bootstrap returns HTTP 200",
+            "id": "217bb5272b6f5b0d17d8c61f5a5d572c",
+            "passes": 6,
+            "fails": 0
+          },
+          {
+            "name": "Login returns HTTP 200",
+            "path": "::Login returns HTTP 200",
+            "id": "f24c7b9c59e7a8298fcf73065eaf8cb2",
+            "passes": 3,
+            "fails": 0
+          },
+          {
+            "fails": 0,
+            "name": "Alert baseline returns HTTP 200",
+            "path": "::Alert baseline returns HTTP 200",
+            "id": "28fe23a7714103c31aaddacb9b2ecc69",
+            "passes": 3
+          },
+          {
+            "id": "2a522a63a6a4b809f67a8f0b977be079",
+            "passes": 3,
+            "fails": 0,
+            "name": "Telemetry acceptance returns HTTP 200",
+            "path": "::Telemetry acceptance returns HTTP 200"
+          },
+          {
+            "name": "Alert poll returns HTTP 200",
+            "path": "::Alert poll returns HTTP 200",
+            "id": "58508aa8308308ce7972a9cfd83a6b0e",
+            "passes": 13,
+            "fails": 0
+          },
+          {
+            "path": "::Logout returns HTTP 204",
+            "id": "ba435ded4c9e72683dc9501020f5fb32",
+            "passes": 3,
+            "fails": 0,
+            "name": "Logout returns HTTP 204"
+          }
+        ]
+    },
+    "options": {
+      "summaryTrendStats": [
+        "avg",
+        "min",
+        "med",
+        "max",
+        "p(90)",
+        "p(95)"
+      ],
+      "summaryTimeUnit": "",
+      "noColor": true
+    },
+    "state": {
+      "isStdOutTTY": false,
+      "isStdErrTTY": false,
+      "testRunDurationMs": 13332.98
+    },
+    "metrics": {
+      "http_req_waiting": {
+        "type": "trend",
+        "contains": "time",
+        "values": {
+          "p(95)": 1896.76795,
+          "avg": 262.1000419354839,
+          "min": 52.1079,
+          "med": 70.8954,
+          "max": 1945.5887,
+          "p(90)": 228.7949
+        }
+      },
+      "vus_max": {
+        "type": "gauge",
+        "contains": "default",
+        "values": {
+          "value": 1,
+          "min": 1,
+          "max": 1
+        }
+      },
+      "assetpulse_telemetry_to_alert_latency": {
+        "type": "trend",
+        "contains": "time",
+        "values": {
+          "max": 3013,
+          "p(90)": 2925.2,
+          "p(95)": 2969.1,
+          "avg": 2145.3333333333335,
+          "min": 849,
+          "med": 2574
+        },
+        "thresholds": {
+          "p(95)<30000": {
+            "ok": true
+          }
+        }
+      },
+      "data_received": {
+        "type": "counter",
+        "contains": "data",
+        "values": {
+          "count": 42252,
+          "rate": 3168.983978075419
+        }
+      },
+      "http_req_receiving": {
+        "type": "trend",
+        "contains": "time",
+        "values": {
+          "avg": 2.801009677419355,
+          "min": 0,
+          "med": 0,
+          "max": 75.0681,
+          "p(90)": 1.0837,
+          "p(95)": 2.3042499999999997
+        }
+      },
+      "vus": {
+        "type": "gauge",
+        "contains": "default",
+        "values": {
+          "value": 1,
+          "min": 1,
+          "max": 1
+        }
+      },
+      "http_req_connecting": {
+        "type": "trend",
+        "contains": "time",
+        "values": {
+          "avg": 0.31659354838709675,
+          "min": 0,
+          "med": 0,
+          "max": 9.8144,
+          "p(90)": 0,
+          "p(95)": 0
+        }
+      },
+      "checks": {
+        "type": "rate",
+        "contains": "default",
+        "values": {
+          "rate": 1,
+          "passes": 31,
+          "fails": 0
+        }
+      },
+      "http_req_duration": {
+        "type": "trend",
+        "contains": "time",
+        "values": {
+          "avg": 265.3016096774194,
+          "min": 52.1079,
+          "med": 73.0138,
+          "max": 1968.6757,
+          "p(90)": 229.5826,
+          "p(95)": 1923.3355999999999
+        }
+      },
+      "data_sent": {
+        "type": "counter",
+        "contains": "data",
+        "values": {
+          "count": 6133,
+          "rate": 459.98718966052604
+        }
+      },
+      "assetpulse_scenario_success": {
+        "values": {
+          "rate": 1,
+          "passes": 3,
+          "fails": 0
+        },
+        "thresholds": {
+          "rate==1": {
+            "ok": true
+          }
+        },
+        "type": "rate",
+        "contains": "default"
+      },
+      "http_req_blocked": {
+        "contains": "time",
+        "values": {
+          "avg": 2.916193548387097,
+          "min": 0,
+          "med": 0,
+          "max": 90.402,
+          "p(90)": 0,
+          "p(95)": 0
+        },
+        "type": "trend"
+      },
+      "http_req_tls_handshaking": {
+        "values": {
+          "p(95)": 0,
+          "avg": 1.4673612903225806,
+          "min": 0,
+          "med": 0,
+          "max": 45.4882,
+          "p(90)": 0
+        },
+        "type": "trend",
+        "contains": "time"
+      },
+      "iterations": {
+        "thresholds": {
+          "count==3": {
+            "ok": true
+          }
+        },
+        "type": "counter",
+        "contains": "default",
+        "values": {
+          "count": 3,
+          "rate": 0.22500596265801046
+        }
+      },
+      "http_req_failed": {
+        "type": "rate",
+        "contains": "default",
+        "values": {
+          "fails": 31,
+          "rate": 0,
+          "passes": 0
+        },
+        "thresholds": {
+          "rate<0.01": {
+            "ok": true
+          }
+        }
+      },
+      "iteration_duration": {
+        "values": {
+          "med": 4861.6525,
+          "max": 5246.7968,
+          "p(90)": 5169.76794,
+          "p(95)": 5208.28237,
+          "avg": 4444.326666666667,
+          "min": 3224.5307
+        },
+        "type": "trend",
+        "contains": "time"
+      },
+      "http_req_sending": {
+        "type": "trend",
+        "contains": "time",
+        "values": {
+          "avg": 0.4005580645161291,
+          "min": 0,
+          "med": 0.5181,
+          "max": 1.5188,
+          "p(90)": 0.7528,
+          "p(95)": 0.7998
+        }
+      },
+      "http_req_duration{expected_response:true}": {
+        "values": {
+          "avg": 265.3016096774194,
+          "min": 52.1079,
+          "med": 73.0138,
+          "max": 1968.6757,
+          "p(90)": 229.5826,
+          "p(95)": 1923.3355999999999
+        },
+        "type": "trend",
+        "contains": "time"
+      },
+      "assetpulse_telemetry_accept_latency": {
+        "type": "trend",
+        "contains": "time",
+        "values": {
+          "med": 197,
+          "max": 229,
+          "p(90)": 222.6,
+          "p(95)": 225.8,
+          "avg": 177.33333333333334,
+          "min": 106
+        },
+        "thresholds": {
+          "p(95)<5000": {
+            "ok": true
+          }
+        }
+      },
+      "http_reqs": {
+        "type": "counter",
+        "contains": "default",
+        "values": {
+          "count": 31,
+          "rate": 2.3250616141327747
+        }
+      }
+    }
+  }
+}

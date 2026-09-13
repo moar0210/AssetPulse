@@ -1,0 +1,50 @@
+{
+  "publicOrigin": "https://assetpulse-rv4z.onrender.com",
+  "applicationRevision": "7541f32a25763aa8439173c0e14db542f6993bbb",
+  "databaseSchemaVersion": 16,
+  "deployments": [
+    {
+      "purpose": "initial-blueprint",
+      "durationSeconds": 206,
+      "result": "live"
+    },
+    {
+      "purpose": "second-compatible",
+      "durationSeconds": 142,
+      "startupSeconds": 95.701,
+      "result": "live"
+    },
+    {
+      "purpose": "rollback",
+      "durationSeconds": 113,
+      "startupSeconds": 94.491,
+      "result": "live"
+    },
+    {
+      "purpose": "restore-current",
+      "durationSeconds": 138,
+      "startupSeconds": 94.798,
+      "result": "live"
+    }
+  ],
+  "flyway": {
+    "validatedMigrations": 16,
+    "currentVersion": 16,
+    "migrationRequired": false
+  },
+  "publicSmoke": {
+    "afterRollback": "8_of_8_passed",
+    "afterRestore": "8_of_8_passed"
+  },
+  "durability": {
+    "markersIdentical": true,
+    "workOrderCount": 3,
+    "alertCount": 4,
+    "telemetryReadingCount": 48,
+    "selectedWorkOrderStatus": "DONE",
+    "selectedWorkOrderVersion": 3
+  },
+  "autoDeployTriggerAfterRehearsal": "after_ci_checks_pass",
+  "observedOnUtc": "2026-09-07",
+  "redaction": "Provider deployment identifiers removed. Measurements and outcomes unchanged."
+}
