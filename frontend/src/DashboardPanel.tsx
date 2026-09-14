@@ -87,7 +87,9 @@ export function DashboardPanel({
   const [dashboardState, setDashboardState] = useState<DashboardState>({
     kind: "loading",
   });
-  const [loadAttempt, setLoadAttempt] = useState(0);
+  const [dashboardRequest, setDashboardRequest] = useState<
+    Readonly<{ resetToRecover: ResetState | null }>
+  >({ resetToRecover: null });
   const [scenarioState, setScenarioState] = useState<ScenarioState>("idle");
   const [resetState, setResetState] = useState<ResetState>({ kind: "idle" });
 
@@ -112,6 +114,12 @@ export function DashboardPanel({
             refreshing: false,
             refreshFailed: false,
           });
+          // A read started before this reset outcome cannot reopen confirmation.
+          setResetState((current) =>
+            current === dashboardRequest.resetToRecover
+              ? { kind: "idle" }
+              : current,
+          );
         }
       })
       .catch((error: unknown) => {
@@ -137,7 +145,7 @@ export function DashboardPanel({
       window.clearTimeout(timeoutId);
       controller.abort();
     };
-  }, [loadAttempt, onSessionExpired]);
+  }, [dashboardRequest, onSessionExpired]);
 
   useEffect(
     () => () => {
@@ -175,6 +183,19 @@ export function DashboardPanel({
       scenarioFeedbackRef.current?.focus();
     }
   }, [scenarioState]);
+
+  function refreshDashboard() {
+    const resetToRecover =
+      resetState.kind === "succeeded" ||
+      resetState.kind === "uncertain" ||
+      resetState.kind === "limit-exceeded"
+        ? resetState
+        : null;
+    if (resetToRecover !== null) {
+      resetFocusTarget.current = "prepare";
+    }
+    setDashboardRequest({ resetToRecover });
+  }
 
   function startCommand() {
     commandController.current?.abort();
@@ -237,7 +258,7 @@ export function DashboardPanel({
         alertsResolved: result.alertsResolved,
         workOrdersCompleted: result.workOrdersCompleted,
       });
-      setLoadAttempt((attempt) => attempt + 1);
+      setDashboardRequest({ resetToRecover: null });
     } catch (error: unknown) {
       if (
         error instanceof DemoSessionExpiredError ||
@@ -288,7 +309,7 @@ export function DashboardPanel({
             dashboardState.kind === "session-expired" ||
             refreshing
           }
-          onClick={() => setLoadAttempt((attempt) => attempt + 1)}
+          onClick={refreshDashboard}
         >
           Refresh dashboard
         </button>
@@ -309,7 +330,7 @@ export function DashboardPanel({
           <button
             className="secondary-button secondary-button--compact"
             type="button"
-            onClick={() => setLoadAttempt((attempt) => attempt + 1)}
+            onClick={refreshDashboard}
           >
             Retry dashboard
           </button>
@@ -505,7 +526,8 @@ export function DashboardPanel({
               tabIndex={-1}
             >
               Demo reset complete: {resetState.alertsResolved} alerts resolved
-              and {resetState.workOrdersCompleted} work orders completed.
+              and {resetState.workOrdersCompleted} work orders completed.{" "}
+              Refresh the dashboard to prepare another reset.
             </p>
           )}
           {resetState.kind === "limit-exceeded" && (
@@ -515,7 +537,9 @@ export function DashboardPanel({
               role="alert"
               tabIndex={-1}
             >
-              Reset stopped at its safety limit; no partial reset was committed.
+              Reset stopped at its safety limit; no partial reset was committed.{" "}
+              Finish active work and alerts, then refresh the dashboard before
+              trying again.
             </p>
           )}
           {resetState.kind === "uncertain" && (

@@ -45,6 +45,21 @@ function dashboardResponse(recentActivity: readonly unknown[] = [activity]) {
   });
 }
 
+function resetResponse() {
+  return jsonResponse({
+    resetAt: "2026-08-31T18:00:00Z",
+    alertsResolved: 1,
+    workOrdersCompleted: 1,
+  });
+}
+
+function problemResponse(code: string, status: number) {
+  return new Response(JSON.stringify({ code }), {
+    status,
+    headers: { "Content-Type": "application/problem+json" },
+  });
+}
+
 function renderDashboard(
   overrides: Partial<Parameters<typeof DashboardPanel>[0]> = {},
 ) {
@@ -193,6 +208,202 @@ describe("integrated dashboard", () => {
         screen.getByRole("button", { name: "Prepare reset" }),
       ).toHaveFocus(),
     );
+  });
+
+  it.each(["uncertain", "limit-exceeded"])(
+    "requires a fresh read and confirmation when reset is %s",
+    async (outcome) => {
+      const fetchMock = vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(dashboardResponse());
+      if (outcome === "uncertain") {
+        fetchMock.mockRejectedValueOnce(new TypeError("Connection lost"));
+      } else {
+        fetchMock.mockResolvedValueOnce(
+          problemResponse("DEMO_RESET_LIMIT_EXCEEDED", 409),
+        );
+      }
+      let resolveReview!: (response: Response) => void;
+      fetchMock
+        .mockReturnValueOnce(
+          new Promise<Response>((resolve) => {
+            resolveReview = resolve;
+          }),
+        )
+        .mockResolvedValueOnce(resetResponse())
+        .mockResolvedValueOnce(dashboardResponse([]));
+      vi.stubGlobal("fetch", fetchMock);
+      renderDashboard();
+      await screen.findByLabelText("Dashboard counts");
+
+      fireEvent.click(screen.getByRole("button", { name: "Prepare reset" }));
+      fireEvent.click(screen.getByRole("button", { name: "Confirm reset" }));
+      const feedback = await screen.findByRole("alert");
+      expect(feedback).toHaveTextContent(
+        outcome === "uncertain" ? "uncertain" : "safety limit",
+      );
+      fireEvent.click(
+        screen.getByRole("button", { name: "Refresh dashboard" }),
+      );
+      expect(feedback).toBeVisible();
+      expect(
+        screen.queryByRole("button", { name: "Prepare reset" }),
+      ).toBeNull();
+      await act(async () => resolveReview(dashboardResponse([])));
+
+      const prepare = await screen.findByRole("button", {
+        name: "Prepare reset",
+      });
+      expect(prepare).toHaveFocus();
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+      fireEvent.click(prepare);
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+      fireEvent.click(screen.getByRole("button", { name: "Confirm reset" }));
+      expect(await screen.findByText(/Demo reset complete/)).toBeVisible();
+      expect(
+        fetchMock.mock.calls.filter(([url]) => url === "/api/v1/demo/reset"),
+      ).toHaveLength(2);
+    },
+  );
+
+  it("preserves success feedback until an explicit refresh prepares another reset", async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(dashboardResponse())
+      .mockResolvedValueOnce(resetResponse())
+      .mockResolvedValueOnce(dashboardResponse([]))
+      .mockResolvedValueOnce(dashboardResponse([]));
+    vi.stubGlobal("fetch", fetchMock);
+    renderDashboard();
+    await screen.findByLabelText("Dashboard counts");
+    fireEvent.click(screen.getByRole("button", { name: "Prepare reset" }));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm reset" }));
+    const feedback = await screen.findByText(/Demo reset complete/);
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Refresh dashboard" }),
+      ).toBeEnabled(),
+    );
+    expect(feedback).toHaveFocus();
+    expect(screen.queryByRole("button", { name: "Prepare reset" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Refresh dashboard" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Prepare reset" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.getByRole("button", { name: "Prepare reset" })).toHaveFocus();
+    expect(
+      fetchMock.mock.calls.filter(([url]) => url === "/api/v1/demo/reset"),
+    ).toHaveLength(1);
+  });
+
+  it.each(["failure", "timeout"])(
+    "keeps an uncertain reset blocked after a dashboard refresh %s",
+    async (outcome) => {
+      const fetchMock = vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(dashboardResponse())
+        .mockRejectedValueOnce(new TypeError("Connection lost"));
+      if (outcome === "failure") {
+        fetchMock.mockResolvedValueOnce(jsonResponse({}, 503));
+      } else {
+        fetchMock.mockImplementationOnce(
+          (_input, init) =>
+            new Promise<Response>((_resolve, reject) => {
+              init?.signal?.addEventListener("abort", () => {
+                reject(new DOMException("Aborted", "AbortError"));
+              });
+            }),
+        );
+      }
+      fetchMock.mockResolvedValueOnce(dashboardResponse([]));
+      vi.stubGlobal("fetch", fetchMock);
+      renderDashboard();
+      await screen.findByLabelText("Dashboard counts");
+      fireEvent.click(screen.getByRole("button", { name: "Prepare reset" }));
+      fireEvent.click(screen.getByRole("button", { name: "Confirm reset" }));
+      const feedback = await screen.findByText(/The reset result is uncertain/);
+
+      if (outcome === "timeout") vi.useFakeTimers();
+      fireEvent.click(
+        screen.getByRole("button", { name: "Refresh dashboard" }),
+      );
+      if (outcome === "timeout") {
+        await act(async () => vi.advanceTimersByTimeAsync(5_000));
+        vi.useRealTimers();
+      }
+      expect(await screen.findByText(/Refresh failed/)).toBeVisible();
+      expect(feedback).toBeVisible();
+      expect(
+        screen.queryByRole("button", { name: "Prepare reset" }),
+      ).toBeNull();
+
+      fireEvent.click(
+        screen.getByRole("button", { name: "Refresh dashboard" }),
+      );
+      expect(
+        await screen.findByRole("button", { name: "Prepare reset" }),
+      ).toBeEnabled();
+      expect(
+        fetchMock.mock.calls.filter(([url]) => url === "/api/v1/demo/reset"),
+      ).toHaveLength(1);
+    },
+  );
+
+  it("does not use a refresh started before the reset outcome to unlock another attempt", async () => {
+    let resolveEarlierRead!: (response: Response) => void;
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(dashboardResponse())
+      .mockReturnValueOnce(
+        new Promise<Response>((resolve) => {
+          resolveEarlierRead = resolve;
+        }),
+      )
+      .mockRejectedValueOnce(new TypeError("Connection lost"))
+      .mockResolvedValueOnce(dashboardResponse([]));
+    vi.stubGlobal("fetch", fetchMock);
+    renderDashboard();
+    await screen.findByLabelText("Dashboard counts");
+    fireEvent.click(screen.getByRole("button", { name: "Refresh dashboard" }));
+    fireEvent.click(screen.getByRole("button", { name: "Prepare reset" }));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm reset" }));
+    const feedback = await screen.findByText(/The reset result is uncertain/);
+
+    await act(async () => resolveEarlierRead(dashboardResponse([])));
+    expect(feedback).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Prepare reset" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Refresh dashboard" }));
+    expect(
+      await screen.findByRole("button", { name: "Prepare reset" }),
+    ).toBeEnabled();
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+
+  it("does not clear a denied reset when a dashboard read is permitted", async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(dashboardResponse())
+      .mockResolvedValueOnce(problemResponse("ACCESS_DENIED", 403))
+      .mockResolvedValueOnce(dashboardResponse([]));
+    vi.stubGlobal("fetch", fetchMock);
+    renderDashboard();
+    await screen.findByLabelText("Dashboard counts");
+    fireEvent.click(screen.getByRole("button", { name: "Prepare reset" }));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm reset" }));
+    const feedback = await screen.findByText(
+      /The server denied this demo reset/,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Refresh dashboard" }));
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Refresh dashboard" }),
+      ).toBeEnabled(),
+    );
+    expect(feedback).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Prepare reset" })).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
   it("keeps viewer controls read-only while retaining dashboard data", async () => {
