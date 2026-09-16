@@ -34,11 +34,12 @@ public class AlertController {
     }
 
     @GetMapping(path = "/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
-    public ResponseEntity<SseEmitter> stream(@AuthenticationPrincipal AuthenticatedActor actor) {
+    public ResponseEntity<SseEmitter> stream(
+            @AuthenticationPrincipal AuthenticatedActor actor, HttpServletRequest request) {
         return ResponseEntity.ok()
                 .cacheControl(CacheControl.noStore())
                 .header("X-Accel-Buffering", "no")
-                .body(streamService.subscribe(actor.organisationId()));
+                .body(streamService.subscribe(actor.organisationId(), request.getSession(false)));
     }
 
     @GetMapping(produces = MediaType.APPLICATION_JSON_VALUE)

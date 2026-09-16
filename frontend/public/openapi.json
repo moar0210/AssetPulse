@@ -671,7 +671,7 @@
       "get": {
         "operationId": "streamAlertChanges",
         "summary": "Subscribe to alert invalidation events",
-        "description": "Best-effort SSE invalidation only. Clients refresh authoritative alert state after ready, change, or reconnect events.",
+        "description": "Best-effort SSE invalidation only. Logout or session expiry revokes that session's subscriptions. Reconnect requires an active session. Clients refresh authoritative alert state after ready, change, or reconnect events.",
         "tags": ["Alerts"],
         "security": [
           {
