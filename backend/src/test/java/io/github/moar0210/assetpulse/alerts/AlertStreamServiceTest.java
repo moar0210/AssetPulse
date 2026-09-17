@@ -22,6 +22,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.springframework.mock.web.MockHttpSession;
 import org.springframework.web.servlet.mvc.method.annotation.ResponseBodyEmitter;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
@@ -37,8 +38,8 @@ class AlertStreamServiceTest {
         CapturingEmitter riverside = new CapturingEmitter();
         AlertStreamService service = serviceWith(northstar, riverside);
 
-        service.subscribe(NORTHSTAR_ID);
-        service.subscribe(RIVERSIDE_ID);
+        service.subscribe(NORTHSTAR_ID, new MockHttpSession());
+        service.subscribe(RIVERSIDE_ID, new MockHttpSession());
         service.publish(
                 NORTHSTAR_ID, new AlertChangeEvent(ALERT_ID, AlertChangeType.OCCURRENCE_RECORDED));
 
@@ -57,8 +58,8 @@ class AlertStreamServiceTest {
         FailingEmitter failed = new FailingEmitter(2);
         CapturingEmitter healthy = new CapturingEmitter();
         AlertStreamService service = serviceWith(failed, healthy);
-        service.subscribe(NORTHSTAR_ID);
-        service.subscribe(NORTHSTAR_ID);
+        service.subscribe(NORTHSTAR_ID, new MockHttpSession());
+        service.subscribe(NORTHSTAR_ID, new MockHttpSession());
         AlertChangeEvent change = new AlertChangeEvent(ALERT_ID, AlertChangeType.STATUS_CHANGED);
 
         assertThatCode(() -> service.publish(NORTHSTAR_ID, change)).doesNotThrowAnyException();
@@ -73,7 +74,8 @@ class AlertStreamServiceTest {
         FailingEmitter failed = new FailingEmitter(1);
         AlertStreamService service = serviceWith(failed);
 
-        assertThatCode(() -> service.subscribe(NORTHSTAR_ID)).doesNotThrowAnyException();
+        assertThatCode(() -> service.subscribe(NORTHSTAR_ID, new MockHttpSession()))
+                .doesNotThrowAnyException();
 
         assertThat(service.subscriberCount(NORTHSTAR_ID)).isZero();
         assertThat(failed.completed).isTrue();
@@ -87,9 +89,9 @@ class AlertStreamServiceTest {
         SseEmitter failed = mock(SseEmitter.class);
         AlertStreamService service = serviceWith(completed, timedOut, failed);
 
-        service.subscribe(NORTHSTAR_ID);
-        service.subscribe(NORTHSTAR_ID);
-        service.subscribe(NORTHSTAR_ID);
+        service.subscribe(NORTHSTAR_ID, new MockHttpSession());
+        service.subscribe(NORTHSTAR_ID, new MockHttpSession());
+        service.subscribe(NORTHSTAR_ID, new MockHttpSession());
         assertThat(service.subscriberCount(NORTHSTAR_ID)).isEqualTo(3);
 
         ArgumentCaptor<Runnable> completion = ArgumentCaptor.forClass(Runnable.class);
@@ -117,8 +119,8 @@ class AlertStreamServiceTest {
         ExecutorService notifications = Executors.newVirtualThreadPerTaskExecutor();
         AlertStreamService service =
                 new AlertStreamService(30_000, ignored -> available.remove(), notifications);
-        service.subscribe(NORTHSTAR_ID);
-        service.subscribe(NORTHSTAR_ID);
+        service.subscribe(NORTHSTAR_ID, new MockHttpSession());
+        service.subscribe(NORTHSTAR_ID, new MockHttpSession());
 
         try {
             service.publish(
@@ -138,7 +140,7 @@ class AlertStreamServiceTest {
         Queue<Runnable> notifications = new ArrayDeque<>();
         AlertStreamService service =
                 new AlertStreamService(30_000, ignored -> emitter, notifications::add);
-        service.subscribe(NORTHSTAR_ID);
+        service.subscribe(NORTHSTAR_ID, new MockHttpSession());
         AlertChangeEvent change = new AlertChangeEvent(ALERT_ID, AlertChangeType.STATUS_CHANGED);
 
         service.publish(NORTHSTAR_ID, change);
@@ -150,7 +152,7 @@ class AlertStreamServiceTest {
     }
 
     @Test
-    void rejectedNotificationWorkRemovesAndCompletesTheSubscriber() {
+    void rejectedNotificationWorkRevokesWithoutBlockingOnSocketCleanup() {
         FailingEmitter emitter = new FailingEmitter(Integer.MAX_VALUE);
         AlertStreamService service =
                 new AlertStreamService(
@@ -159,7 +161,7 @@ class AlertStreamServiceTest {
                         ignored -> {
                             throw new RejectedExecutionException("shutting down");
                         });
-        service.subscribe(NORTHSTAR_ID);
+        service.subscribe(NORTHSTAR_ID, new MockHttpSession());
 
         assertThatCode(
                         () ->
@@ -170,7 +172,7 @@ class AlertStreamServiceTest {
                 .doesNotThrowAnyException();
 
         assertThat(service.subscriberCount(NORTHSTAR_ID)).isZero();
-        assertThat(emitter.completed).isTrue();
+        assertThat(emitter.completed).isFalse();
     }
 
     @Test
@@ -181,7 +183,7 @@ class AlertStreamServiceTest {
                 CallbackEmitter departing = new CallbackEmitter();
                 CapturingEmitter arriving = new CapturingEmitter();
                 AlertStreamService service = serviceWith(departing, arriving);
-                service.subscribe(NORTHSTAR_ID);
+                service.subscribe(NORTHSTAR_ID, new MockHttpSession());
                 CountDownLatch start = new CountDownLatch(1);
 
                 Future<?> removal =
@@ -194,7 +196,7 @@ class AlertStreamServiceTest {
                         races.submit(
                                 () -> {
                                     await(start);
-                                    service.subscribe(NORTHSTAR_ID);
+                                    service.subscribe(NORTHSTAR_ID, new MockHttpSession());
                                 });
                 start.countDown();
                 removal.get(2, TimeUnit.SECONDS);
