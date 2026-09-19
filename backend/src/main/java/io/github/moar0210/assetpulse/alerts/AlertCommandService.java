@@ -81,13 +81,7 @@ public class AlertCommandService {
         }
 
         commandRepository.insertHistory(
-                organisationId,
-                alertId,
-                sequenceNumber,
-                expectedStatus,
-                targetStatus,
-                actorUserId,
-                transitionedAt);
+                organisationId, alertId, sequenceNumber, expectedStatus, actorUserId);
         auditService.record(organisationId, actorUserId, auditAction, alertId, correlationId);
         AlertDetailResponse response =
                 queryRepository
