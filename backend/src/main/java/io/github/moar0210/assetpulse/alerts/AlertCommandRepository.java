@@ -39,15 +39,17 @@ public class AlertCommandRepository {
                 actor_user_id,
                 transitioned_at
             )
-            VALUES (
-                :organisationId,
-                :alertId,
+            SELECT
+                organisation_id,
+                id,
                 :sequenceNumber,
                 :fromStatus,
-                :toStatus,
+                status,
                 :actorUserId,
-                :transitionedAt
-            )
+                updated_at
+            FROM alert
+            WHERE organisation_id = :organisationId
+              AND id = :alertId
             """;
 
     private final JdbcClient jdbcClient;
@@ -88,9 +90,7 @@ public class AlertCommandRepository {
             UUID alertId,
             int sequenceNumber,
             AlertStatus fromStatus,
-            AlertStatus toStatus,
-            UUID actorUserId,
-            Instant transitionedAt) {
+            UUID actorUserId) {
         int inserted =
                 jdbcClient
                         .sql(INSERT_HISTORY)
@@ -98,9 +98,7 @@ public class AlertCommandRepository {
                         .param("alertId", alertId)
                         .param("sequenceNumber", sequenceNumber)
                         .param("fromStatus", fromStatus.name())
-                        .param("toStatus", toStatus.name())
                         .param("actorUserId", actorUserId)
-                        .param("transitionedAt", transitionedAt.atOffset(ZoneOffset.UTC))
                         .update();
         if (inserted != 1) {
             throw new IllegalStateException("Alert status history was not recorded");

@@ -79,6 +79,25 @@ const acknowledgedDetail = {
   ],
 } as const;
 
+const resolvedDetail = {
+  ...acknowledgedDetail,
+  status: "RESOLVED",
+  updatedAt: "2026-08-23T10:04:00.123456Z",
+  history: [
+    {
+      ...acknowledgedDetail.history[0],
+      transitionedAt: "2026-08-23T10:04:00.123456Z",
+    },
+    {
+      ...acknowledgedDetail.history[0],
+      sequenceNumber: 2,
+      fromStatus: "ACKNOWLEDGED",
+      toStatus: "RESOLVED",
+      transitionedAt: "2026-08-23T10:04:00.123456Z",
+    },
+  ],
+} as const;
+
 function jsonResponse(payload: unknown, status = 200) {
   return new Response(JSON.stringify(payload), {
     status,
@@ -177,6 +196,44 @@ describe("alert API client", () => {
     );
 
     await expect(getAlertDetail(alertId)).rejects.toThrow("unexpected payload");
+  });
+
+  it("accepts equal persisted history timestamps in reads and resolve responses", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn<typeof fetch>()
+        .mockImplementation(async () => jsonResponse(resolvedDetail)),
+    );
+
+    await expect(getAlertDetail(alertId)).resolves.toEqual(resolvedDetail);
+    await expect(resolveAlert(alertId, csrfToken)).resolves.toEqual(
+      resolvedDetail,
+    );
+  });
+
+  it("rejects history that moves backward by one microsecond in reads and resolve responses", async () => {
+    const reversedHistory = {
+      ...resolvedDetail,
+      history: [
+        resolvedDetail.history[0],
+        {
+          ...resolvedDetail.history[1],
+          transitionedAt: "2026-08-23T10:04:00.123455Z",
+        },
+      ],
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn<typeof fetch>()
+        .mockImplementation(async () => jsonResponse(reversedHistory)),
+    );
+
+    await expect(getAlertDetail(alertId)).rejects.toThrow("unexpected payload");
+    await expect(resolveAlert(alertId, csrfToken)).rejects.toBeInstanceOf(
+      AlertCommandUncertainError,
+    );
   });
 
   it("classifies session, permission, and missing-alert read failures", async () => {

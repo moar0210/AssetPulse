@@ -17,6 +17,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -600,6 +601,69 @@ class AlertApiIntegrationTest {
     }
 
     @Test
+    @DisplayName("ALR-02: acknowledgement history uses the persisted time after clock rollback")
+    void acknowledgementHistoryUsesTheClampedAlertTimestamp() throws Exception {
+        insertNorthstarAlert(AlertStatus.OPEN);
+        Instant persistedAt = Instant.now().plusSeconds(3_600).truncatedTo(ChronoUnit.MICROS);
+        setAlertUpdatedAt(persistedAt);
+        AuthenticatedSession admin = login("admin@northstar.example");
+
+        MvcResult result =
+                mockMvc.perform(command(admin, NORTHSTAR_ALERT_ID, "acknowledge"))
+                        .andExpect(status().isOk())
+                        .andReturn();
+
+        JsonNode acknowledged = objectMapper.readTree(result.getResponse().getContentAsString());
+        assertThat(acknowledged.path("updatedAt").asText()).isEqualTo(persistedAt.toString());
+        assertHistory(
+                acknowledged.path("history").get(0),
+                1,
+                AlertStatus.OPEN,
+                AlertStatus.ACKNOWLEDGED,
+                persistedAt.toString());
+        assertThat(detail(admin.session(), NORTHSTAR_ALERT_ID)).isEqualTo(acknowledged);
+        assertAlertStateAndHistory(NORTHSTAR_ALERT_ID, AlertStatus.ACKNOWLEDGED, 1);
+        assertAlertAudit(result, "ALERT_ACKNOWLEDGED");
+    }
+
+    @Test
+    @DisplayName("ALR-02: resolution cannot precede acknowledgement after clock rollback")
+    void resolutionHistoryCannotMoveBackwardsFromThePreviousTransition() throws Exception {
+        insertNorthstarAlert(AlertStatus.ACKNOWLEDGED);
+        Instant acknowledgedAt = Instant.now().plusSeconds(3_600).truncatedTo(ChronoUnit.MICROS);
+        setAlertUpdatedAt(acknowledgedAt);
+        insertHistory(
+                NORTHSTAR_ID,
+                NORTHSTAR_ALERT_ID,
+                1,
+                AlertStatus.OPEN,
+                AlertStatus.ACKNOWLEDGED,
+                NORTHSTAR_ADMIN_ID,
+                acknowledgedAt);
+        AuthenticatedSession admin = login("admin@northstar.example");
+        JsonNode originalHistory =
+                detail(admin.session(), NORTHSTAR_ALERT_ID).path("history").get(0);
+
+        MvcResult result =
+                mockMvc.perform(command(admin, NORTHSTAR_ALERT_ID, "resolve"))
+                        .andExpect(status().isOk())
+                        .andReturn();
+
+        JsonNode resolved = objectMapper.readTree(result.getResponse().getContentAsString());
+        assertThat(resolved.path("updatedAt").asText()).isEqualTo(acknowledgedAt.toString());
+        assertThat(resolved.path("history").get(0)).isEqualTo(originalHistory);
+        assertHistory(
+                resolved.path("history").get(1),
+                2,
+                AlertStatus.ACKNOWLEDGED,
+                AlertStatus.RESOLVED,
+                acknowledgedAt.toString());
+        assertThat(detail(admin.session(), NORTHSTAR_ALERT_ID)).isEqualTo(resolved);
+        assertAlertStateAndHistory(NORTHSTAR_ALERT_ID, AlertStatus.RESOLVED, 2);
+        assertAlertAudit(result, "ALERT_RESOLVED");
+    }
+
+    @Test
     void historyInsertFailureRollsBackTheConditionalStateUpdate() {
         insertNorthstarAlert(AlertStatus.OPEN);
         Instant originalUpdatedAt = readAlertUpdatedAt(NORTHSTAR_ALERT_ID);
@@ -1107,6 +1171,14 @@ class AlertApiIntegrationTest {
                 .param("alertId", alertId)
                 .query(String.class)
                 .single();
+    }
+
+    private void setAlertUpdatedAt(Instant updatedAt) {
+        jdbcClient
+                .sql("UPDATE alert SET updated_at = :updatedAt WHERE id = :alertId")
+                .param("updatedAt", updatedAt.atOffset(ZoneOffset.UTC))
+                .param("alertId", NORTHSTAR_ALERT_ID)
+                .update();
     }
 
     private Instant readAlertUpdatedAt(UUID alertId) {
