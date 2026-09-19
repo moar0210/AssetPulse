@@ -29,13 +29,13 @@ type OperationsQueueState =
 
 type SelectedEvent = Readonly<{
   event: DeadProcessingEvent;
-  presence: "dead" | "no-longer-dead";
+  presence: "dead" | "no-longer-dead" | "retry-accepted" | "unknown";
 }>;
 
 type ActionState =
   "idle" | "submitting" | "recovering" | "recovery-failed" | "blocked";
 
-type RecoveryReason = "conflict" | "uncertain";
+type RecoveryReason = "conflict" | "uncertain" | "refresh";
 
 type ActionFeedback = Readonly<{
   kind: "success" | "conflict" | "uncertain" | "forbidden";
@@ -50,6 +50,14 @@ type QueueLoadOutcome =
   | Readonly<{ kind: "superseded" }>;
 
 const API_TIMEOUT_MS = 5_000;
+const UNKNOWN_STATE_MESSAGE =
+  "The latest results do not include this event, so its current state is unknown. Refresh the latest state or return to operations.";
+const presenceLabels = {
+  dead: "Dead",
+  "no-longer-dead": "No longer dead",
+  "retry-accepted": "Retry accepted",
+  unknown: "Status unconfirmed",
+} as const;
 
 function formatTimestamp(value: string) {
   return new Intl.DateTimeFormat(undefined, {
@@ -92,11 +100,12 @@ export function OperationsPanel({
     null,
   );
   const selectedEventId = selectedEvent?.event.id ?? null;
+  const selectedEventPresence = selectedEvent?.presence;
   const queueController = useRef<AbortController | null>(null);
   const commandController = useRef<AbortController | null>(null);
   const queueRequestSequence = useRef(0);
   const mounted = useRef(true);
-  const recoveryReason = useRef<RecoveryReason>("uncertain");
+  const recoveryReason = useRef<RecoveryReason>("refresh");
   const queueFocus = useRef<HTMLElement | null>(null);
   const detailFocus = useRef<HTMLElement | null>(null);
   const feedbackFocus = useRef<HTMLParagraphElement | null>(null);
@@ -150,7 +159,15 @@ export function OperationsPanel({
           }
           const latest = findEvent(result, current.event.id);
           return latest === undefined
-            ? { ...current, presence: "no-longer-dead" }
+            ? {
+                ...current,
+                presence:
+                  result.events.length < result.limit
+                    ? "no-longer-dead"
+                    : current.presence === "retry-accepted"
+                      ? "retry-accepted"
+                      : "unknown",
+              }
             : { event: latest, presence: "dead" };
         });
         return { kind: "success", result };
@@ -190,13 +207,18 @@ export function OperationsPanel({
   const recoverLatestState = useCallback(
     async (reason: RecoveryReason) => {
       recoveryReason.current = reason;
+      const feedbackKind = reason === "conflict" ? "conflict" : "uncertain";
+      const introduction =
+        reason === "conflict"
+          ? "This event changed before the retry was accepted. "
+          : reason === "uncertain"
+            ? "The retry result could not be confirmed. "
+            : "";
       setActionState("recovering");
       setActionFeedback({
-        kind: reason,
+        kind: feedbackKind,
         message:
-          reason === "conflict"
-            ? "This event changed before the retry was accepted. Loading the latest saved state before another retry."
-            : "The retry result could not be confirmed. Loading the latest saved state before another retry.",
+          introduction + "Loading the latest saved state before another retry.",
       });
 
       const currentEventId = selectedEventId;
@@ -221,11 +243,10 @@ export function OperationsPanel({
       if (outcome.kind === "failed") {
         setActionState("recovery-failed");
         setActionFeedback({
-          kind: reason,
+          kind: feedbackKind,
           message:
-            reason === "conflict"
-              ? "This event changed, but the latest saved state could not be loaded. Retry the latest state before another retry request."
-              : "The retry result and latest saved state could not be confirmed. Retry the latest state before another retry request.",
+            introduction +
+            "The latest saved state could not be loaded. Retry the latest state before another retry request.",
         });
         return;
       }
@@ -237,15 +258,14 @@ export function OperationsPanel({
       }
       setActionState("idle");
       setActionFeedback({
-        kind: reason,
+        kind: feedbackKind,
         message:
-          reason === "conflict"
-            ? remainsDead
-              ? "This event changed before the retry was accepted. The latest saved state still shows it as dead."
-              : "This event changed before the retry was accepted. The latest saved state confirms it is no longer dead."
-            : remainsDead
-              ? "The retry result could not be confirmed. The latest saved state still shows this event as dead."
-              : "The retry result could not be confirmed. The latest saved state confirms this event is no longer dead.",
+          introduction +
+          (remainsDead
+            ? "The latest saved state still shows this event as dead."
+            : outcome.result.events.length < outcome.result.limit
+              ? "The latest saved state confirms this event is no longer dead."
+              : UNKNOWN_STATE_MESSAGE),
       });
     },
     [readQueue, selectedEventId],
@@ -282,6 +302,12 @@ export function OperationsPanel({
     }
   }, [actionFeedback]);
 
+  useEffect(() => {
+    if (selectedEventPresence === "unknown") {
+      feedbackFocus.current?.focus();
+    }
+  }, [selectedEventPresence]);
+
   async function handleRetry(event: DeadProcessingEvent) {
     if (actionState !== "idle" || selectedEvent?.presence !== "dead") {
       return;
@@ -303,7 +329,7 @@ export function OperationsPanel({
         return;
       }
       setSelectedEvent((current) =>
-        current === null ? null : { ...current, presence: "no-longer-dead" },
+        current === null ? null : { ...current, presence: "retry-accepted" },
       );
       setQueueState((current) =>
         current.kind === "ready"
@@ -362,7 +388,10 @@ export function OperationsPanel({
   }
 
   function handleRecoveryRetry() {
-    if (actionState !== "recovery-failed") {
+    if (
+      actionState !== "recovery-failed" &&
+      !(actionState === "idle" && selectedEvent?.presence === "unknown")
+    ) {
       return;
     }
     focusFeedbackAfterUpdate.current = true;
@@ -371,6 +400,11 @@ export function OperationsPanel({
 
   if (selectedEvent !== null) {
     const { event, presence } = selectedEvent;
+    const feedback =
+      actionFeedback ??
+      (presence === "unknown"
+        ? { kind: "uncertain", message: UNKNOWN_STATE_MESSAGE }
+        : null);
     return (
       <section
         ref={detailFocus}
@@ -384,7 +418,7 @@ export function OperationsPanel({
           disabled={
             actionState === "submitting" ||
             actionState === "recovering" ||
-            actionState === "recovery-failed"
+            (actionState === "recovery-failed" && presence !== "unknown")
           }
           onClick={() => {
             setSelectedEvent(null);
@@ -405,7 +439,7 @@ export function OperationsPanel({
             <span
               className={`operations-status operations-status--${presence}`}
             >
-              {presence === "dead" ? "Dead" : "No longer dead"}
+              {presenceLabels[presence]}
             </span>
           </header>
 
@@ -476,42 +510,47 @@ export function OperationsPanel({
             </dl>
           </section>
 
-          {actionFeedback !== null && (
+          {feedback !== null && (
             <p
               ref={feedbackFocus}
-              className={`form-message operations-action-feedback operations-action-feedback--${actionFeedback.kind}`}
-              role={actionFeedback.kind === "success" ? "status" : "alert"}
+              className={`form-message operations-action-feedback operations-action-feedback--${feedback.kind}`}
+              role={feedback.kind === "success" ? "status" : "alert"}
               tabIndex={-1}
             >
-              {actionFeedback.message}
+              {feedback.message}
             </p>
           )}
 
-          {presence === "dead" && (
+          {(presence === "dead" || presence === "unknown") && (
             <div className="operations-actions">
               <button
                 className="primary-button"
                 type="button"
-                disabled={actionState !== "idle"}
+                disabled={actionState !== "idle" || presence !== "dead"}
                 onClick={() => void handleRetry(event)}
               >
                 {actionState === "submitting"
                   ? "Requesting retry…"
                   : actionState === "recovering"
                     ? "Recovering latest state…"
-                    : actionState === "recovery-failed"
+                    : actionState === "recovery-failed" ||
+                        presence === "unknown"
                       ? "Latest state required"
                       : actionState === "blocked"
                         ? "Retry unavailable"
                         : "Retry processing event"}
               </button>
-              {actionState === "recovery-failed" && (
+              {(actionState === "recovery-failed" ||
+                presence === "unknown") && (
                 <button
                   className="secondary-button secondary-button--compact"
                   type="button"
+                  disabled={actionState === "recovering"}
                   onClick={handleRecoveryRetry}
                 >
-                  Retry latest state
+                  {actionState === "recovery-failed"
+                    ? "Retry latest state"
+                    : "Refresh latest state"}
                 </button>
               )}
             </div>
@@ -613,6 +652,7 @@ export function OperationsPanel({
                 aria-label={`View dead processing event ${event.id}`}
                 onClick={() => {
                   originatingEventId.current = event.id;
+                  recoveryReason.current = "refresh";
                   setActionState("idle");
                   setActionFeedback(null);
                   setSelectedEvent({ event, presence: "dead" });
