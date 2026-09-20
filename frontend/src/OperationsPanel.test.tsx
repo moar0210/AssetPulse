@@ -27,6 +27,13 @@ const deadEvent = {
   lastErrorMessage: "Processing failed; another attempt may be scheduled.",
 } as const;
 
+const newerDeadEvents = Array.from({ length: 50 }, (_, index) => ({
+  ...deadEvent,
+  id: `60000000-0000-0000-0000-${String(index + 2).padStart(12, "0")}`,
+  deadAt: "2026-08-24T10:05:00Z",
+  updatedAt: "2026-08-24T10:05:01Z",
+}));
+
 function jsonResponse(payload: unknown, status = 200) {
   return new Response(JSON.stringify(payload), {
     status,
@@ -372,7 +379,7 @@ describe("OperationsPanel", () => {
     );
 
     const feedback = await screen.findByText(
-      "This event changed before the retry was accepted. The latest saved state confirms it is no longer dead.",
+      "This event changed before the retry was accepted. The latest saved state confirms this event is no longer dead.",
     );
     expect(feedback).toHaveFocus();
     expect(screen.getByText("No longer dead")).toBeVisible();
@@ -409,6 +416,284 @@ describe("OperationsPanel", () => {
     expect(
       screen.getByRole("button", { name: "Retry processing event" }),
     ).toBeEnabled();
+    expect(queueReads).toBe(2);
+  });
+
+  it.each(["conflict", "uncertain"] as const)(
+    "keeps an event displaced by newer failures unconfirmed after a %s result",
+    async (result) => {
+      let queueReads = 0;
+      let retryCalls = 0;
+      vi.stubGlobal(
+        "fetch",
+        vi.fn<typeof fetch>((input) => {
+          if (String(input) === "/api/v1/processing-events/dead?limit=50") {
+            queueReads += 1;
+            return Promise.resolve(
+              deadQueue(queueReads === 1 ? [deadEvent] : newerDeadEvents),
+            );
+          }
+          retryCalls += 1;
+          return result === "conflict"
+            ? Promise.resolve(
+                problemResponse("PROCESSING_EVENT_STATE_CONFLICT", 409),
+              )
+            : Promise.reject(new TypeError("connection lost"));
+        }),
+      );
+
+      render(
+        <OperationsPanel csrfToken={csrfToken} onSessionExpired={vi.fn()} />,
+      );
+      await openEventDetail();
+      fireEvent.click(
+        screen.getByRole("button", { name: "Retry processing event" }),
+      );
+
+      const feedback = await screen.findByText(
+        /the latest results do not include this event, so its current state is unknown/i,
+      );
+      expect(feedback).toHaveFocus();
+      expect(screen.getByText("Status unconfirmed")).toBeVisible();
+      expect(screen.getByText(eventId)).toBeVisible();
+      expect(screen.getByText(deadEvent.lastErrorMessage)).toBeVisible();
+      expect(screen.queryByText("No longer dead")).toBeNull();
+      expect(screen.queryByText(/confirms .*no longer dead/i)).toBeNull();
+      const blockedRetry = screen.getByRole("button", {
+        name: "Latest state required",
+      });
+      expect(blockedRetry).toBeDisabled();
+      fireEvent.click(blockedRetry);
+      expect(
+        screen.getByRole("button", { name: "Refresh latest state" }),
+      ).toBeEnabled();
+      expect(
+        screen.getByRole("button", { name: "Back to operations" }),
+      ).toBeEnabled();
+      expect(retryCalls).toBe(1);
+      expect(queueReads).toBe(2);
+
+      fireEvent.click(
+        screen.getByRole("button", { name: "Back to operations" }),
+      );
+      expect(
+        await screen.findAllByRole("button", {
+          name: /^View dead processing event /,
+        }),
+      ).toHaveLength(50);
+      expect(
+        screen.getByRole("region", { name: "Processing operations" }),
+      ).toHaveFocus();
+      expect(retryCalls).toBe(1);
+    },
+  );
+
+  it("unlocks a displaced event only when a later refresh finds it again", async () => {
+    let queueReads = 0;
+    let retryCalls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<typeof fetch>((input) => {
+        if (String(input) === "/api/v1/processing-events/dead?limit=50") {
+          queueReads += 1;
+          return Promise.resolve(
+            deadQueue(queueReads === 2 ? newerDeadEvents : [deadEvent]),
+          );
+        }
+        retryCalls += 1;
+        return Promise.reject(new TypeError("connection lost"));
+      }),
+    );
+
+    render(
+      <OperationsPanel csrfToken={csrfToken} onSessionExpired={vi.fn()} />,
+    );
+    await openEventDetail();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Retry processing event" }),
+    );
+
+    const refreshButton = await screen.findByRole("button", {
+      name: "Refresh latest state",
+    });
+    refreshButton.focus();
+    fireEvent.click(refreshButton);
+
+    const feedback = await screen.findByText(
+      "The retry result could not be confirmed. The latest saved state still shows this event as dead.",
+    );
+    expect(feedback).toHaveFocus();
+    expect(screen.getByText("Dead")).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: "Retry processing event" }),
+    ).toBeEnabled();
+    expect(
+      screen.queryByRole("button", { name: "Refresh latest state" }),
+    ).toBeNull();
+    expect(retryCalls).toBe(1);
+    expect(queueReads).toBe(3);
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Retry processing event" }),
+    );
+    await waitFor(() => expect(retryCalls).toBe(2));
+    await screen.findByText(
+      "The retry result could not be confirmed. The latest saved state still shows this event as dead.",
+    );
+  });
+
+  it("retains uncertainty and a way back when a displaced event's refresh fails", async () => {
+    let queueReads = 0;
+    let retryCalls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<typeof fetch>((input) => {
+        if (String(input) === "/api/v1/processing-events/dead?limit=50") {
+          queueReads += 1;
+          if (queueReads === 1) {
+            return Promise.resolve(deadQueue());
+          }
+          return Promise.resolve(
+            queueReads === 2
+              ? deadQueue(newerDeadEvents)
+              : jsonResponse({}, 503),
+          );
+        }
+        retryCalls += 1;
+        return Promise.resolve(
+          problemResponse("PROCESSING_EVENT_STATE_CONFLICT", 409),
+        );
+      }),
+    );
+
+    render(
+      <OperationsPanel csrfToken={csrfToken} onSessionExpired={vi.fn()} />,
+    );
+    await openEventDetail();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Retry processing event" }),
+    );
+    const refreshButton = await screen.findByRole("button", {
+      name: "Refresh latest state",
+    });
+    refreshButton.focus();
+    fireEvent.click(refreshButton);
+
+    const feedback = await screen.findByText(
+      /latest saved state could not be loaded/i,
+    );
+    expect(feedback).toHaveFocus();
+    expect(screen.getByText("Status unconfirmed")).toBeVisible();
+    expect(screen.queryByText("No longer dead")).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Latest state required" }),
+    ).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "Retry latest state" }),
+    ).toBeEnabled();
+    expect(
+      screen.getByRole("button", { name: "Back to operations" }),
+    ).toBeEnabled();
+    expect(retryCalls).toBe(1);
+    expect(queueReads).toBe(3);
+  });
+
+  it("preserves a confirmed retry when newer failures fill the next result page", async () => {
+    const refresh = deferred<Response>();
+    let queueReads = 0;
+    let retryCalls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<typeof fetch>((input) => {
+        if (String(input) === "/api/v1/processing-events/dead?limit=50") {
+          queueReads += 1;
+          return queueReads === 1
+            ? Promise.resolve(deadQueue())
+            : refresh.promise;
+        }
+        retryCalls += 1;
+        return Promise.resolve(new Response(null, { status: 204 }));
+      }),
+    );
+
+    render(
+      <OperationsPanel csrfToken={csrfToken} onSessionExpired={vi.fn()} />,
+    );
+    await openEventDetail();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Retry processing event" }),
+    );
+
+    const feedback = await screen.findByText(
+      "Retry accepted. Processing will resume asynchronously with a fresh attempt cycle.",
+    );
+    await act(async () => refresh.resolve(deadQueue(newerDeadEvents)));
+    expect(feedback).toHaveFocus();
+    expect(await screen.findByText("Retry accepted")).toBeVisible();
+    expect(screen.queryByText("Status unconfirmed")).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Retry processing event" }),
+    ).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Refresh latest state" }),
+    ).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Back to operations" }),
+    ).toBeEnabled();
+    expect(retryCalls).toBe(1);
+    expect(queueReads).toBe(2);
+  });
+
+  it("keeps a selected event unconfirmed when an ordinary refresh displaces it", async () => {
+    const refresh = deferred<Response>();
+    let queueReads = 0;
+    let retryCalls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<typeof fetch>((input) => {
+        if (String(input) === "/api/v1/processing-events/dead?limit=50") {
+          queueReads += 1;
+          return queueReads === 1
+            ? Promise.resolve(deadQueue())
+            : refresh.promise;
+        }
+        retryCalls += 1;
+        return Promise.resolve(new Response(null, { status: 204 }));
+      }),
+    );
+
+    render(
+      <OperationsPanel csrfToken={csrfToken} onSessionExpired={vi.fn()} />,
+    );
+    const row = await screen.findByRole("button", {
+      name: `View dead processing event ${eventId}`,
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Refresh operations" }));
+    fireEvent.click(row);
+    await screen.findByRole("heading", { name: "Processing event" });
+
+    await act(async () => refresh.resolve(deadQueue(newerDeadEvents)));
+
+    expect(screen.getByText("Status unconfirmed")).toBeVisible();
+    expect(
+      screen.getByText(
+        /the latest results do not include this event, so its current state is unknown/i,
+      ),
+    ).toBeVisible();
+    expect(screen.queryByText("No longer dead")).toBeNull();
+    expect(
+      screen.queryByText(/retry result could not be confirmed/i),
+    ).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Latest state required" }),
+    ).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "Refresh latest state" }),
+    ).toBeEnabled();
+    expect(
+      screen.getByRole("button", { name: "Back to operations" }),
+    ).toBeEnabled();
+    expect(retryCalls).toBe(0);
     expect(queueReads).toBe(2);
   });
 
@@ -459,7 +744,7 @@ describe("OperationsPanel", () => {
     fireEvent.click(recoveryButton);
 
     const recovered = await screen.findByText(
-      "This event changed before the retry was accepted. The latest saved state confirms it is no longer dead.",
+      "This event changed before the retry was accepted. The latest saved state confirms this event is no longer dead.",
     );
     expect(recovered).toHaveFocus();
     expect(

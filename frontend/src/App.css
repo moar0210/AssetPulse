@@ -1698,10 +1698,17 @@ code {
   text-transform: uppercase;
 }
 
-.operations-status--no-longer-dead {
+.operations-status--no-longer-dead,
+.operations-status--retry-accepted {
   border-color: rgb(117 216 182 / 30%);
   color: #9ce5cc;
   background: rgb(117 216 182 / 8%);
+}
+
+.operations-status--unknown {
+  border-color: rgb(225 187 102 / 35%);
+  color: #efd49d;
+  background: rgb(225 187 102 / 8%);
 }
 
 .operations-facts {
