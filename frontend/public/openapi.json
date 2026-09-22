@@ -1481,7 +1481,7 @@
         "name": "from",
         "in": "query",
         "required": true,
-        "description": "Inclusive UTC range start.",
+        "description": "Inclusive range start. After normalization to UTC, must be at or after 0000-01-01T00:00:00Z and before +10000-01-01T00:00:00Z.",
         "schema": {
           "type": "string",
           "format": "date-time"
@@ -1491,7 +1491,7 @@
         "name": "to",
         "in": "query",
         "required": true,
-        "description": "Exclusive UTC range end, no more than 24 hours after from.",
+        "description": "Exclusive range end, no more than 24 hours after from. After normalization to UTC, must be at or after 0000-01-01T00:00:00Z and before +10000-01-01T00:00:00Z.",
         "schema": {
           "type": "string",
           "format": "date-time"
@@ -2033,7 +2033,7 @@
           "observedAt": {
             "type": "string",
             "format": "date-time",
-            "description": "Must not be in the future."
+            "description": "Must not be in the future. After normalization to UTC, must be at or after 0000-01-01T00:00:00Z and before +10000-01-01T00:00:00Z."
           }
         }
       },

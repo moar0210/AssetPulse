@@ -184,6 +184,64 @@ describe("alert API client", () => {
     await expect(getAlertDetail(alertId)).rejects.toThrow("unexpected payload");
   });
 
+  it.each(["0000-01-01T00:00:00Z", "9999-12-31T23:59:59.999999Z"])(
+    "accepts supported calendar boundary %s in alert reads",
+    async (occurredAt) => {
+      const boundarySummary = { ...summary, lastOccurredAt: occurredAt };
+      const boundaryDetail = {
+        ...openDetail,
+        firstOccurredAt: occurredAt,
+        lastOccurredAt: occurredAt,
+        cooldownUntil: occurredAt,
+      };
+      vi.stubGlobal(
+        "fetch",
+        vi
+          .fn<typeof fetch>()
+          .mockResolvedValueOnce(
+            jsonResponse({ alerts: [boundarySummary], limit: 50 }),
+          )
+          .mockResolvedValueOnce(jsonResponse(boundaryDetail)),
+      );
+
+      await expect(getAlerts()).resolves.toEqual({
+        alerts: [boundarySummary],
+        limit: 50,
+      });
+      await expect(getAlertDetail(alertId)).resolves.toEqual(boundaryDetail);
+    },
+  );
+
+  it.each(["-0001-12-31T23:59:59Z", "+10000-01-01T00:00:00Z"])(
+    "rejects unsupported calendar value %s in alert reads",
+    async (occurredAt) => {
+      vi.stubGlobal(
+        "fetch",
+        vi
+          .fn<typeof fetch>()
+          .mockResolvedValueOnce(
+            jsonResponse({
+              alerts: [{ ...summary, lastOccurredAt: occurredAt }],
+              limit: 50,
+            }),
+          )
+          .mockResolvedValueOnce(
+            jsonResponse({
+              ...openDetail,
+              firstOccurredAt: occurredAt,
+              lastOccurredAt: occurredAt,
+              cooldownUntil: occurredAt,
+            }),
+          ),
+      );
+
+      await expect(getAlerts()).rejects.toThrow("unexpected payload");
+      await expect(getAlertDetail(alertId)).rejects.toThrow(
+        "unexpected payload",
+      );
+    },
+  );
+
   it("rejects detail whose cooldown ends before its latest occurrence", async () => {
     vi.stubGlobal(
       "fetch",
