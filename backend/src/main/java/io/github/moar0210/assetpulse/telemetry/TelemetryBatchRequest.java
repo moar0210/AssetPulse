@@ -30,5 +30,13 @@ public record TelemetryBatchRequest(
                     @DecimalMin("-1000000000000.000000")
                     @DecimalMax("1000000000000.000000")
                     BigDecimal value,
-            @NotNull @PastOrPresent Instant observedAt) {}
+            @NotNull @PastOrPresent Instant observedAt) {
+
+        public Reading {
+            if (observedAt != null && !TelemetryTimestampRange.contains(observedAt)) {
+                throw new IllegalArgumentException(
+                        "Observation time is outside the supported range");
+            }
+        }
+    }
 }

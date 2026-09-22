@@ -25,6 +25,8 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -351,6 +353,81 @@ class TelemetryBatchIntegrationTest {
         assertThat(count("telemetry_batch")).isZero();
         assertThat(count("telemetry_reading")).isZero();
         assertThat(count("telemetry_processing_event")).isZero();
+    }
+
+    @ParameterizedTest
+    @ValueSource(
+            strings = {
+                "-000001-12-31T23:59:59Z",
+                "-000001-12-31T23:59:59.999999999Z",
+                "0000-01-01T00:00:00+00:01",
+                "-999999999-01-01T00:00:00Z",
+                "-1000000000-01-01T00:00:00Z"
+            })
+    void unsupportedObservationRejectsTheWholeBatchWithoutConsumingItsKey(String observedAt)
+            throws Exception {
+        AuthenticatedSession admin = login("admin@northstar.example");
+        Map<String, Object> invalidRequest =
+                requestWithReadings(
+                        "timestamp-boundary",
+                        reading(NORTHSTAR_SENSOR, "70"),
+                        readingAt(NORTHSTAR_SENSOR, new BigDecimal("85"), observedAt));
+
+        accept(admin, invalidRequest)
+                .andExpect(status().isBadRequest())
+                .andExpect(header().string("Cache-Control", "no-store"))
+                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
+                .andExpect(jsonPath("$.code").value("INVALID_REQUEST"))
+                .andExpect(content().string(not(containsString(observedAt))));
+
+        assertThat(count("telemetry_batch")).isZero();
+        assertThat(count("telemetry_reading")).isZero();
+        assertThat(count("telemetry_processing_event")).isZero();
+        assertThat(count("alert")).isZero();
+
+        Map<String, Object> corrected = request("timestamp-boundary", NORTHSTAR_SENSOR, "70");
+        String accepted =
+                accept(admin, corrected)
+                        .andExpect(status().isOk())
+                        .andReturn()
+                        .getResponse()
+                        .getContentAsString();
+        accept(admin, corrected).andExpect(status().isOk()).andExpect(content().json(accepted));
+        assertThat(count("telemetry_batch")).isOne();
+        assertThat(count("telemetry_reading")).isOne();
+        assertThat(count("telemetry_processing_event")).isOne();
+    }
+
+    @Test
+    void earliestSupportedObservationRoundTripsAndRetainsExactRetryBehavior() throws Exception {
+        AuthenticatedSession admin = login("admin@northstar.example");
+        Map<String, Object> request =
+                requestWithReadings(
+                        "earliest-observation",
+                        readingAt(
+                                NORTHSTAR_SENSOR,
+                                new BigDecimal("85"),
+                                "0000-01-01T01:00:00+01:00"));
+
+        String accepted =
+                accept(admin, request)
+                        .andExpect(status().isOk())
+                        .andReturn()
+                        .getResponse()
+                        .getContentAsString();
+        accept(admin, request).andExpect(status().isOk()).andExpect(content().json(accepted));
+        mockMvc.perform(
+                        get("/api/v1/sensors/" + NORTHSTAR_SENSOR + "/telemetry-readings")
+                                .session(admin.session())
+                                .queryParam("from", "0000-01-01T00:00:00Z")
+                                .queryParam("to", "0000-01-01T00:01:00Z"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.from").value("0000-01-01T00:00:00Z"))
+                .andExpect(jsonPath("$.readings.length()").value(1))
+                .andExpect(jsonPath("$.readings[0].observedAt").value("0000-01-01T00:00:00Z"));
+        assertThat(count("telemetry_batch")).isOne();
+        assertThat(count("telemetry_reading")).isOne();
+        assertThat(count("telemetry_processing_event")).isOne();
     }
 
     private org.springframework.test.web.servlet.ResultActions accept(

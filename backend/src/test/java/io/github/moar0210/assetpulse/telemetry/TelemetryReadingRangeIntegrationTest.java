@@ -234,6 +234,19 @@ class TelemetryReadingRangeIntegrationTest {
     }
 
     @Test
+    void lastSupportedRangeBoundRoundTripsAfterTimezoneNormalization() throws Exception {
+        mockMvc.perform(
+                        get(telemetryPath(NORTHSTAR_SENSOR_ID))
+                                .session(login("viewer@northstar.example"))
+                                .queryParam("from", "9999-12-31T22:00:00Z")
+                                .queryParam("to", "+10000-01-01T00:59:59.999999999+01:00"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.from").value("9999-12-31T22:00:00Z"))
+                .andExpect(jsonPath("$.to").value("9999-12-31T23:59:59.999999999Z"))
+                .andExpect(jsonPath("$.readings").isEmpty());
+    }
+
+    @Test
     void anonymousRequestsAreDeniedBeforeTelemetryIsResolved() throws Exception {
         mockMvc.perform(rangeRequest(NORTHSTAR_SENSOR_ID, RANGE_START, RANGE_END))
                 .andExpect(status().isUnauthorized())
@@ -609,6 +622,46 @@ class TelemetryReadingRangeIntegrationTest {
                 Arguments.of("malformed to", from, "not-an-instant", null),
                 Arguments.of("equal bounds", from, from, null),
                 Arguments.of("reversed bounds", to, from, null),
+                Arguments.of(
+                        "negative years",
+                        "-000001-01-01T00:00:00Z",
+                        "-000001-01-01T01:00:00Z",
+                        null),
+                Arguments.of(
+                        "before earliest supported instant",
+                        "-000001-12-31T23:59:59.999999999Z",
+                        "0000-01-01T00:00:00Z",
+                        null),
+                Arguments.of(
+                        "offset before earliest supported instant",
+                        "0000-01-01T00:00:00+00:01",
+                        "0000-01-01T00:01:00Z",
+                        null),
+                Arguments.of(
+                        "after latest supported instant",
+                        "9999-12-31T23:59:59Z",
+                        "+10000-01-01T00:00:00Z",
+                        null),
+                Arguments.of(
+                        "offset after latest supported instant",
+                        "9999-12-31T23:59:00Z",
+                        "9999-12-31T23:59:59-00:01",
+                        null),
+                Arguments.of(
+                        "beyond database years",
+                        "+999999999-01-01T00:00:00Z",
+                        "+999999999-01-01T01:00:00Z",
+                        null),
+                Arguments.of(
+                        "instant minimum",
+                        "-1000000000-01-01T00:00:00Z",
+                        "-1000000000-01-01T01:00:00Z",
+                        null),
+                Arguments.of(
+                        "instant maximum",
+                        "+1000000000-12-31T23:00:00Z",
+                        "+1000000000-12-31T23:59:59.999999999Z",
+                        null),
                 Arguments.of(
                         "more than twenty-four hours",
                         from,

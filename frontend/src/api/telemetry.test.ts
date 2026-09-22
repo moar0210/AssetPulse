@@ -136,6 +136,56 @@ describe("telemetry API", () => {
   });
 
   it.each([
+    {
+      boundary: "minimum",
+      from: "0000-01-01T00:00:00Z",
+      to: "0000-01-01T00:01:00Z",
+      requestFrom: "0000-01-01T01:00:00+01:00",
+      requestTo: "0000-01-01T01:01:00+01:00",
+      observedAt: "0000-01-01T00:00:00Z",
+    },
+    {
+      boundary: "maximum",
+      from: "9999-12-31T23:59:59Z",
+      to: "9999-12-31T23:59:59.999999999Z",
+      requestFrom: "9999-12-31T22:59:59-01:00",
+      requestTo: "9999-12-31T22:59:59.999999999-01:00",
+      observedAt: "9999-12-31T23:59:59.999999Z",
+    },
+  ])(
+    "accepts canonical output at the supported $boundary calendar boundary",
+    async ({ from, to, requestFrom, requestTo, observedAt }) => {
+      const payload = {
+        ...validPayload(),
+        from,
+        to,
+        readings: [{ ...validPayload().readings[0], observedAt }],
+      };
+      vi.stubGlobal(
+        "fetch",
+        vi.fn<typeof fetch>(async () => jsonResponse(payload)),
+      );
+
+      await expect(
+        getTelemetryReadings(SENSOR_ID, requestFrom, requestTo),
+      ).resolves.toEqual(payload);
+    },
+  );
+
+  it.each([
+    ["-0001-12-31T23:59:59Z", "0000-01-01T00:00:00Z"],
+    ["9999-12-31T23:59:59Z", "+10000-01-01T00:00:00Z"],
+  ])("rejects unsupported calendar bounds %s to %s", async (from, to) => {
+    const fetchMock = vi.fn<typeof fetch>();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(getTelemetryReadings(SENSOR_ID, from, to)).rejects.toThrow(
+      "telemetry range",
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
     ["extra top-level field", { ...validPayload(), organisationId: "hidden" }],
     [
       "wrong sensor",

@@ -11,8 +11,8 @@ public record TelemetryReadingRangeRequest(Instant from, Instant to, int limit) 
     private static final Duration MAX_SPAN = Duration.ofHours(24);
 
     public TelemetryReadingRangeRequest {
-        if (from == null
-                || to == null
+        if (!TelemetryTimestampRange.contains(from)
+                || !TelemetryTimestampRange.contains(to)
                 || !from.isBefore(to)
                 || Duration.between(from, to).compareTo(MAX_SPAN) > 0
                 || limit < 1
