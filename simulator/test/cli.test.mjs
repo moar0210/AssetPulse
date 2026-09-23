@@ -3,7 +3,12 @@ import test from "node:test";
 
 import { runCli } from "../src/cli.mjs";
 
-async function rejectsBeforeRequest(argv, environment, pattern) {
+async function rejectsBeforeRequest(
+  argv,
+  environment,
+  pattern,
+  now = new Date("2026-08-15T12:00:00Z"),
+) {
   let requests = 0;
 
   await assert.rejects(
@@ -11,7 +16,7 @@ async function rejectsBeforeRequest(argv, environment, pattern) {
       runCli({
         argv,
         environment,
-        now: new Date("2026-08-15T12:00:00Z"),
+        now,
         fetchImpl: async () => {
           requests += 1;
           throw new Error("Network should not be called");
@@ -73,3 +78,31 @@ test("rejects malformed environment overrides before making a network request", 
   );
   await rejectsBeforeRequest(["normal"], null, /process environment/);
 });
+
+for (const scenarioName of ["normal", "overheating"]) {
+  test(`${scenarioName} rejects an unsupported fixed anchor before login`, async () => {
+    for (const rawAnchor of [
+      "0000-01-01T00:00:00Z",
+      "0000-01-01T00:04:59.999Z",
+      "0000-01-01T01:04:59.999+01:00",
+      "0000-01-01T00:05:00+01:00",
+      "9999-12-31T23:59:00-00:01",
+    ]) {
+      await rejectsBeforeRequest(
+        [scenarioName, `--at=${rawAnchor}`],
+        {},
+        /supported telemetry range/,
+        new Date("+010001-01-01T00:00:00Z"),
+      );
+    }
+  });
+
+  test(`${scenarioName} validates the default anchor after rounding`, async () => {
+    await rejectsBeforeRequest(
+      [scenarioName],
+      {},
+      /supported telemetry range/,
+      new Date("0000-01-01T00:04:59.999Z"),
+    );
+  });
+}

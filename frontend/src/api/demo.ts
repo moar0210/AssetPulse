@@ -54,6 +54,8 @@ const NORTHSTAR_SENSOR_ID = "30000000-0000-0000-0000-000000000001";
 const OVERHEATING_VALUES = [72, 74, 77.5, 80, 83.5, 86] as const;
 const MAX_RESET_RECORDS = 100;
 const MINUTE_MS = 60_000;
+const MIN_OBSERVATION_MS = Date.parse("0000-01-01T00:00:00Z");
+const OBSERVATION_END_MS = Date.parse("+010000-01-01T00:00:00Z");
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -140,12 +142,23 @@ async function readJson(response: Response): Promise<unknown> {
 }
 
 function scenarioRequest(now: Date) {
-  if (!Number.isFinite(now.getTime())) {
+  const invocationMs = now.getTime();
+  if (
+    !Number.isFinite(invocationMs) ||
+    invocationMs < MIN_OBSERVATION_MS ||
+    invocationMs >= OBSERVATION_END_MS
+  ) {
     throw new Error("A valid scenario time is required");
   }
   const anchor = new Date(
-    Math.floor((now.getTime() - MINUTE_MS) / MINUTE_MS) * MINUTE_MS,
+    Math.floor((invocationMs - MINUTE_MS) / MINUTE_MS) * MINUTE_MS,
   );
+  if (
+    anchor.getTime() - (OVERHEATING_VALUES.length - 1) * MINUTE_MS <
+    MIN_OBSERVATION_MS
+  ) {
+    throw new Error("A valid scenario time is required");
+  }
   const compactInvocation = now
     .toISOString()
     .replaceAll("-", "")
