@@ -9,6 +9,8 @@ const SCENARIO_VALUES = Object.freeze({
 });
 
 const MINUTE_MS = 60_000;
+const MIN_OBSERVATION_MS = Date.parse("0000-01-01T00:00:00Z");
+const OBSERVATION_END_MS = Date.parse("+010000-01-01T00:00:00Z");
 
 export function resolveAnchor(rawAnchor, now = new Date()) {
   if (!(now instanceof Date) || !Number.isFinite(now.getTime())) {
@@ -42,6 +44,15 @@ export function buildScenario(scenarioName, anchor) {
 
   if (!(anchor instanceof Date) || !Number.isFinite(anchor.getTime())) {
     throw new Error("A valid observation anchor is required");
+  }
+
+  if (
+    anchor.getTime() - (values.length - 1) * MINUTE_MS < MIN_OBSERVATION_MS ||
+    anchor.getTime() >= OBSERVATION_END_MS
+  ) {
+    throw new Error(
+      "The scenario readings must stay within the supported telemetry range",
+    );
   }
 
   const compactAnchor = anchor
