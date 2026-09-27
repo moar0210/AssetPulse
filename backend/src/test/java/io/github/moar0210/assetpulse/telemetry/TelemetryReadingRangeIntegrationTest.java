@@ -173,6 +173,83 @@ class TelemetryReadingRangeIntegrationTest {
                 .isEqualTo(readings.get(4).id().toString());
     }
 
+    @ParameterizedTest
+    @MethodSource("subMicrosecondRanges")
+    void nanosecondBoundsSelectOnlyStoredReadingsInTheOriginalRange(
+            Instant base, long fromNanos, long toNanos, List<Integer> expectedIndexes)
+            throws Exception {
+        List<ReadingFixture> readings =
+                List.of(
+                        reading(
+                                "56000000-0000-0000-0000-000000000001",
+                                "10",
+                                base.minusNanos(1_000)),
+                        reading("56000000-0000-0000-0000-000000000002", "20", base),
+                        reading(
+                                "56000000-0000-0000-0000-000000000003",
+                                "30",
+                                base.plusNanos(1_000)),
+                        reading(
+                                "56000000-0000-0000-0000-000000000004",
+                                "40",
+                                base.plusNanos(1_000)),
+                        reading(
+                                "56000000-0000-0000-0000-000000000005",
+                                "50",
+                                base.plusNanos(2_000)));
+        insertReadings(NORTHSTAR_ID, NORTHSTAR_SENSOR_ID, readings);
+        Instant from = base.plusNanos(fromNanos);
+        Instant to = base.plusNanos(toNanos);
+
+        JsonNode payload =
+                readRange(
+                        rangeRequest(NORTHSTAR_SENSOR_ID, from, to)
+                                .queryParam("limit", "2")
+                                .session(login("viewer@northstar.example")));
+
+        assertThat(payload.path("from").asText()).isEqualTo(from.toString());
+        assertThat(payload.path("to").asText()).isEqualTo(to.toString());
+        assertThat(payload.path("readings").findValuesAsText("id"))
+                .containsExactlyElementsOf(
+                        expectedIndexes.stream()
+                                .map(index -> readings.get(index).id().toString())
+                                .toList());
+        for (JsonNode reading : payload.path("readings")) {
+            Instant observedAt = Instant.parse(reading.path("observedAt").asText());
+            assertThat(observedAt).isAfterOrEqualTo(from).isBefore(to);
+        }
+    }
+
+    @Test
+    void aFullDayRangeRetainsNanosecondBoundsAndBothStoredEdges() throws Exception {
+        Instant from = RANGE_START.plusNanos(1);
+        Instant to = from.plusSeconds(24 * 60 * 60);
+        ReadingFixture first =
+                reading("57000000-0000-0000-0000-000000000002", "20", RANGE_START.plusNanos(1_000));
+        ReadingFixture last =
+                reading(
+                        "57000000-0000-0000-0000-000000000003",
+                        "30",
+                        RANGE_START.plusSeconds(24 * 60 * 60));
+        insertReadings(
+                NORTHSTAR_ID,
+                NORTHSTAR_SENSOR_ID,
+                List.of(
+                        reading("57000000-0000-0000-0000-000000000001", "10", RANGE_START),
+                        first,
+                        last));
+
+        JsonNode payload =
+                readRange(
+                        rangeRequest(NORTHSTAR_SENSOR_ID, from, to)
+                                .session(login("viewer@northstar.example")));
+
+        assertThat(payload.path("from").asText()).isEqualTo(from.toString());
+        assertThat(payload.path("to").asText()).isEqualTo(to.toString());
+        assertThat(payload.path("readings").findValuesAsText("id"))
+                .containsExactly(first.id().toString(), last.id().toString());
+    }
+
     @Test
     void omittedLimitDefaultsToTheMostRecentOneHundredRows() throws Exception {
         List<ReadingFixture> readings =
@@ -235,6 +312,14 @@ class TelemetryReadingRangeIntegrationTest {
 
     @Test
     void lastSupportedRangeBoundRoundTripsAfterTimezoneNormalization() throws Exception {
+        insertReadings(
+                NORTHSTAR_ID,
+                NORTHSTAR_SENSOR_ID,
+                List.of(
+                        reading(
+                                "58000000-0000-0000-0000-000000000001",
+                                "10",
+                                Instant.parse("9999-12-31T23:59:59.999999Z"))));
         mockMvc.perform(
                         get(telemetryPath(NORTHSTAR_SENSOR_ID))
                                 .session(login("viewer@northstar.example"))
@@ -243,7 +328,9 @@ class TelemetryReadingRangeIntegrationTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.from").value("9999-12-31T22:00:00Z"))
                 .andExpect(jsonPath("$.to").value("9999-12-31T23:59:59.999999999Z"))
-                .andExpect(jsonPath("$.readings").isEmpty());
+                .andExpect(jsonPath("$.readings.length()").value(1))
+                .andExpect(
+                        jsonPath("$.readings[0].observedAt").value("9999-12-31T23:59:59.999999Z"));
     }
 
     @Test
@@ -623,6 +710,11 @@ class TelemetryReadingRangeIntegrationTest {
                 Arguments.of("equal bounds", from, from, null),
                 Arguments.of("reversed bounds", to, from, null),
                 Arguments.of(
+                        "one nanosecond beyond twenty-four hours",
+                        from,
+                        RANGE_START.plusSeconds(24 * 60 * 60).plusNanos(1).toString(),
+                        null),
+                Arguments.of(
                         "negative years",
                         "-000001-01-01T00:00:00Z",
                         "-000001-01-01T01:00:00Z",
@@ -675,6 +767,23 @@ class TelemetryReadingRangeIntegrationTest {
     }
 
     private record ReadingFixture(UUID id, BigDecimal value, Instant observedAt) {}
+
+    private static Stream<Arguments> subMicrosecondRanges() {
+        return Stream.of(
+                        "0000-01-01T00:00:00.000001Z",
+                        "1969-12-31T23:59:59.999999Z",
+                        "2026-08-01T23:59:59.999999Z")
+                .map(Instant::parse)
+                .flatMap(
+                        base ->
+                                Stream.of(
+                                        Arguments.of(base, -1L, 1L, List.of(1)),
+                                        Arguments.of(base, 0L, 1L, List.of(1)),
+                                        Arguments.of(base, 1L, 1_000L, List.of()),
+                                        Arguments.of(base, 1L, 1_001L, List.of(2, 3)),
+                                        Arguments.of(base, 500L, 1_999L, List.of(2, 3)),
+                                        Arguments.of(base, 1_001L, 2_001L, List.of(4))));
+    }
 
     private record CsrfExchange(MockHttpSession session, String headerName, String token) {}
 }
