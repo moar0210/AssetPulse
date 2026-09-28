@@ -268,9 +268,23 @@ function WorkOrderDetailPanel({
   useEffect(() => {
     if (detailState.kind === "not-found" || detailState.kind === "forbidden") {
       detailFocus.current?.focus();
-    } else if (feedback !== null) {
-      feedbackFocus.current?.focus();
+      return;
     }
+
+    if (feedback === null) {
+      return;
+    }
+
+    const element = feedbackFocus.current;
+    if (!(element instanceof HTMLElement)) {
+      return;
+    }
+
+    const frameId = window.requestAnimationFrame(() => {
+      element.focus();
+    });
+
+    return () => window.cancelAnimationFrame(frameId);
   }, [detailState.kind, feedback]);
 
   const recoverLatest = useCallback(
@@ -558,8 +572,7 @@ function WorkOrderDetailPanel({
             <div>
               <dt>Assigned technician</dt>
               <dd>
-                {readyWorkOrder.assignedTechnician?.displayName ??
-                  "Not assigned"}
+                {readyWorkOrder.assignedTechnician?.displayName ?? "Not assigned"}
               </dd>
             </div>
             <div>
@@ -969,8 +982,7 @@ export function WorkOrderPanel({
                   <span className="work-order-row-button__facts">
                     <StatusBadge status={workOrder.status} />
                     <span>
-                      {workOrder.assignedTechnician?.displayName ??
-                        "Unassigned"}
+                      {workOrder.assignedTechnician?.displayName ?? "Unassigned"}
                     </span>
                     <time dateTime={workOrder.updatedAt}>
                       {formatTimestamp(workOrder.updatedAt)}
