@@ -499,7 +499,7 @@
       "get": {
         "operationId": "listTelemetryReadings",
         "summary": "Read a bounded sensor time range",
-        "description": "The half-open request window must be positive and no longer than 24 hours.",
+        "description": "The half-open request window must be positive and no longer than 24 hours. Nanosecond bounds are compared exactly against stored microsecond reading timestamps, and the response preserves the requested bounds.",
         "tags": ["Telemetry"],
         "security": [
           {

@@ -312,6 +312,120 @@ describe("telemetry API", () => {
     );
   });
 
+  it.each([
+    {
+      description: "after the epoch",
+      from: "2026-08-15T11:00:00.000000001Z",
+      to: "2026-08-15T11:00:00.000001001Z",
+      observedAt: "2026-08-15T11:00:00.000001Z",
+    },
+    {
+      description: "before the epoch",
+      from: "1969-12-31T23:59:59.999998999Z",
+      to: "1969-12-31T23:59:59.999999001Z",
+      observedAt: "1969-12-31T23:59:59.999999Z",
+    },
+    {
+      description: "across the epoch",
+      from: "1969-12-31T23:59:59.999999999Z",
+      to: "1970-01-01T00:00:00.000000001Z",
+      observedAt: "1970-01-01T00:00:00Z",
+    },
+  ])(
+    "preserves nanosecond bounds around a stored microsecond $description",
+    async ({ from, to, observedAt }) => {
+      const payload = {
+        ...validPayload(),
+        from,
+        to,
+        readings: [{ ...validPayload().readings[0], observedAt }],
+      };
+      const fetchMock = vi.fn<typeof fetch>(async () => jsonResponse(payload));
+      vi.stubGlobal("fetch", fetchMock);
+
+      await expect(getTelemetryReadings(SENSOR_ID, from, to)).resolves.toEqual(
+        payload,
+      );
+      expect(fetchMock).toHaveBeenCalledWith(
+        `/api/v1/sensors/${SENSOR_ID}/telemetry-readings?${new URLSearchParams({ from, to, limit: "100" })}`,
+        expect.objectContaining({ method: "GET" }),
+      );
+    },
+  );
+
+  it.each([
+    {
+      description: "one nanosecond below the lower bound",
+      from: "2026-08-15T11:00:00.000001001Z",
+      to: "2026-08-15T11:00:00.000002Z",
+      observedAt: "2026-08-15T11:00:00.000001Z",
+    },
+    {
+      description: "one nanosecond above the upper bound",
+      from: "2026-08-15T11:00:00Z",
+      to: "2026-08-15T11:00:00.000000999Z",
+      observedAt: "2026-08-15T11:00:00.000001Z",
+    },
+    {
+      description: "one nanosecond below a negative-epoch lower bound",
+      from: "1969-12-31T23:59:59.999999001Z",
+      to: "1970-01-01T00:00:00Z",
+      observedAt: "1969-12-31T23:59:59.999999Z",
+    },
+    {
+      description: "one nanosecond above a negative-epoch upper bound",
+      from: "1969-12-31T23:59:59Z",
+      to: "1969-12-31T23:59:59.999998999Z",
+      observedAt: "1969-12-31T23:59:59.999999Z",
+    },
+  ])(
+    "rejects a stored microsecond $description",
+    async ({ from, to, observedAt }) => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn<typeof fetch>(async () =>
+          jsonResponse({
+            ...validPayload(),
+            from,
+            to,
+            readings: [{ ...validPayload().readings[0], observedAt }],
+          }),
+        ),
+      );
+
+      await expect(getTelemetryReadings(SENSOR_ID, from, to)).rejects.toThrow(
+        "unexpected payload",
+      );
+    },
+  );
+
+  it.each(["from", "to"] as const)(
+    "rejects a response that rounds the requested %s bound to microseconds",
+    async (bound) => {
+      const from = "2026-08-15T11:00:00.000000001Z";
+      const to = "2026-08-15T11:00:00.000001001Z";
+      vi.stubGlobal(
+        "fetch",
+        vi.fn<typeof fetch>(async () =>
+          jsonResponse({
+            ...validPayload(),
+            from,
+            to,
+            [bound]:
+              bound === "from"
+                ? "2026-08-15T11:00:00.000001Z"
+                : "2026-08-15T11:00:00.000002Z",
+            readings: [],
+          }),
+        ),
+      );
+
+      await expect(getTelemetryReadings(SENSOR_ID, from, to)).rejects.toThrow(
+        "unexpected payload",
+      );
+    },
+  );
+
   it("enforces the requested result limit on the response", async () => {
     vi.stubGlobal(
       "fetch",

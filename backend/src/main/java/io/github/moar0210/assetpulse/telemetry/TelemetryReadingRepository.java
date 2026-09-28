@@ -57,8 +57,8 @@ public class TelemetryReadingRepository {
                 .sql(FIND_MOST_RECENT_IN_RANGE)
                 .param("organisationId", organisationId)
                 .param("sensorId", sensorId)
-                .param("from", from.atOffset(ZoneOffset.UTC))
-                .param("to", to.atOffset(ZoneOffset.UTC))
+                .param("from", ceilToMicrosecond(from).atOffset(ZoneOffset.UTC))
+                .param("to", ceilToMicrosecond(to).atOffset(ZoneOffset.UTC))
                 .param("limit", limit)
                 .query(
                         (resultSet, rowNumber) ->
@@ -69,5 +69,11 @@ public class TelemetryReadingRepository {
                                                 .getObject("observed_at", OffsetDateTime.class)
                                                 .toInstant()))
                 .list();
+    }
+
+    // Ceiling both bounds preserves the half-open interval for stored microsecond timestamps.
+    private static Instant ceilToMicrosecond(Instant value) {
+        int remainder = value.getNano() % 1_000;
+        return remainder == 0 ? value : value.plusNanos(1_000 - remainder);
     }
 }
