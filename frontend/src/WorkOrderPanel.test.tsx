@@ -550,6 +550,87 @@ describe("work-order experience", () => {
     ).toHaveFocus();
   });
 
+  it.each(["completion button", "previous success message"] as const)(
+    "WO-04: focuses committed completion feedback from the %s before animation frames",
+    async (focusOrigin) => {
+      // Keep animation frames pending so focus must be committed with the feedback.
+      vi.spyOn(window, "requestAnimationFrame").mockImplementation(() => 1);
+      let current: WorkOrderDetail = assignedDetail;
+      const pendingStart = pendingResponse();
+      const pendingCompletion = pendingResponse();
+      const fetchMock = installFetch(async (url) => {
+        if (url === "/api/v1/work-orders?limit=50") {
+          return jsonResponse({ workOrders: [summaryOf(current)], limit: 50 });
+        }
+        if (url === `/api/v1/work-orders/${workOrderId}`) {
+          return jsonResponse(current);
+        }
+        if (url.endsWith("/start")) {
+          return pendingStart.promise;
+        }
+        if (url.endsWith("/complete")) {
+          return pendingCompletion.promise;
+        }
+        throw new Error(`Unexpected URL ${url}`);
+      });
+      await openDetailAs();
+      fireEvent.click(screen.getByRole("button", { name: "Start work" }));
+      current = inProgressDetail;
+      await act(async () => pendingStart.resolve(jsonResponse(current)));
+
+      const started = screen.getByText(
+        "Work started. The work order is now in progress.",
+      );
+      const completeButton = screen.getByRole("button", {
+        name: "Complete work",
+      });
+      const focused =
+        focusOrigin === "previous success message" ? started : completeButton;
+      focused.focus();
+      expect(focused).toHaveFocus();
+      fireEvent.click(completeButton);
+
+      expect(started).not.toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "Completing work…" }),
+      ).toBeDisabled();
+      expect(
+        screen.getByRole("button", { name: "Back to work orders" }),
+      ).toBeDisabled();
+      if (focusOrigin === "previous success message") {
+        expect(document.body).toHaveFocus();
+      }
+
+      current = doneDetail;
+      await act(async () => pendingCompletion.resolve(jsonResponse(current)));
+
+      expect(
+        screen.getByText("Work completed. The work order is now done."),
+      ).toHaveFocus();
+      expect(screen.getByText("Done")).toBeVisible();
+      expect(screen.getByText("Read-only")).toBeVisible();
+      expect(
+        screen.queryByRole("button", { name: /^(start|complete) work$/i }),
+      ).not.toBeInTheDocument();
+      expect(
+        within(
+          screen.getByRole("list", { name: "Work-order status history" }),
+        ).getAllByRole("listitem"),
+      ).toHaveLength(3);
+      const posts = fetchMock.mock.calls.filter(
+        ([, init]) => init?.method === "POST",
+      );
+      expect(posts.map(([url]) => url)).toEqual([
+        `/api/v1/work-orders/${workOrderId}/start`,
+        `/api/v1/work-orders/${workOrderId}/complete`,
+      ]);
+      expect(posts.map(([, init]) => init?.body)).toEqual([
+        JSON.stringify({ expectedVersion: 1 }),
+        JSON.stringify({ expectedVersion: 2 }),
+      ]);
+    },
+  );
+
   const readOnlyCases = [
     { role: "admin", identity: adminIdentity },
     {
