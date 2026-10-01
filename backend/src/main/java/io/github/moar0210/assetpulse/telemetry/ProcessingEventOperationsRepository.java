@@ -37,13 +37,13 @@ public class ProcessingEventOperationsRepository {
             UPDATE telemetry_processing_event
             SET status = 'PENDING',
                 attempt_count = 0,
-                next_attempt_at = :retriedAt,
+                next_attempt_at = GREATEST(:retriedAt, created_at, dead_at, updated_at),
                 claim_token = NULL,
                 claim_owner = NULL,
                 lease_expires_at = NULL,
                 completed_at = NULL,
                 dead_at = NULL,
-                updated_at = :retriedAt,
+                updated_at = GREATEST(:retriedAt, created_at, dead_at, updated_at),
                 last_error_code = NULL,
                 last_error_message = NULL
             WHERE organisation_id = :organisationId

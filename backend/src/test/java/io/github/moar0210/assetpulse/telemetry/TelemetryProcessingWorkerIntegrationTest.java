@@ -56,6 +56,7 @@ class TelemetryProcessingWorkerIntegrationTest {
     @Autowired private TelemetryProcessingEventRepository eventRepository;
     @Autowired private TelemetryProcessingLifecycleService lifecycleService;
     @Autowired private TelemetryProcessingExecutionService executionService;
+    @Autowired private TelemetryProcessingPolicy processingPolicy;
     @Autowired private TransactionTemplate transactionTemplate;
 
     @BeforeEach
@@ -284,6 +285,29 @@ class TelemetryProcessingWorkerIntegrationTest {
     }
 
     @Test
+    void completionCannotPrecedeThePersistedClaimAfterClockRollback() {
+        EventFixture fixture = createPendingEvent("completion-clock-rollback");
+        TelemetryProcessingClaim claim =
+                lifecycleService.claimNext("worker-a", Instant.now().plusSeconds(60)).orElseThrow();
+        ProcessingRow processing = readEvent(fixture.eventId());
+
+        assertThat(
+                        executionService.execute(
+                                claim,
+                                event ->
+                                        updateBatchKey(
+                                                event.telemetryBatchId(),
+                                                "completion-clock-rollback-effect")))
+                .isTrue();
+
+        assertThat(readBatchKey(fixture.batchId())).isEqualTo("completion-clock-rollback-effect");
+        ProcessingRow completed = readEvent(fixture.eventId());
+        assertThat(completed.status()).isEqualTo("COMPLETED");
+        assertThat(completed.completedAt()).isAfterOrEqualTo(processing.updatedAt());
+        assertThat(completed.updatedAt()).isEqualTo(completed.completedAt());
+    }
+
+    @Test
     void aFailingHandlerRollsBackBeforeAFixedSafeFailureSchedulesTheExactRetry() {
         EventFixture fixture = createPendingEvent("failing-handler");
         TelemetryProcessingClaim claim =
@@ -342,6 +366,67 @@ class TelemetryProcessingWorkerIntegrationTest {
     }
 
     @Test
+    void aRetryableFailureAfterClockRollbackPreservesTheClaimTimeAndRetryDelay() {
+        EventFixture fixture = createPendingEvent("retry-clock-rollback");
+        TelemetryProcessingClaim claim =
+                lifecycleService.claimNext("worker-a", CLAIMED_AT).orElseThrow();
+        for (int attempt = 1; attempt < processingPolicy.maxAttempts(); attempt++) {
+            ProcessingRow processing = readEvent(fixture.eventId());
+            Instant expectedNextAttemptAt =
+                    processing.updatedAt().plus(processingPolicy.retryDelay(attempt));
+
+            assertThat(
+                            lifecycleService.recordFailure(
+                                    claim, processing.updatedAt().minusSeconds(60)))
+                    .isEqualTo(TelemetryProcessingFailureDisposition.RETRY_SCHEDULED);
+
+            ProcessingRow retry = readEvent(fixture.eventId());
+            assertThat(retry.status()).isEqualTo("PENDING");
+            assertThat(retry.updatedAt()).isEqualTo(processing.updatedAt());
+            assertThat(retry.nextAttemptAt()).isEqualTo(expectedNextAttemptAt);
+            assertThat(lifecycleService.claimNext("worker-b", expectedNextAttemptAt.minusMillis(1)))
+                    .isEmpty();
+            assertThat(readEvent(fixture.eventId())).isEqualTo(retry);
+
+            TelemetryProcessingClaim retried =
+                    lifecycleService.claimNext("worker-b", expectedNextAttemptAt).orElseThrow();
+            assertThat(retried.event().id()).isEqualTo(fixture.eventId());
+            assertThat(retried.attemptCount()).isEqualTo(attempt + 1);
+            assertThat(retried.claimToken()).isNotEqualTo(claim.claimToken());
+            claim = retried;
+        }
+    }
+
+    @Test
+    void aRetryableFailureAcrossDaylightSavingRollbackKeepsTheExactRetryDelay() {
+        EventFixture fixture = createPendingEvent("retry-daylight-saving-rollback");
+        TelemetryProcessingClaim claim =
+                lifecycleService
+                        .claimNext("worker-a", Instant.parse("2026-11-02T06:00:00Z"))
+                        .orElseThrow();
+        ProcessingRow processing = readEvent(fixture.eventId());
+
+        ProcessingRow retry =
+                transactionTemplate.execute(
+                        status -> {
+                            jdbcClient.sql("SET LOCAL TIME ZONE 'America/New_York'").update();
+                            assertThat(
+                                            lifecycleService.recordFailure(
+                                                    claim, Instant.parse("2026-10-31T06:00:00Z")))
+                                    .isEqualTo(
+                                            TelemetryProcessingFailureDisposition.RETRY_SCHEDULED);
+                            return readEvent(fixture.eventId());
+                        });
+
+        assertThat(retry.updatedAt()).isEqualTo(processing.updatedAt());
+        assertThat(retry.nextAttemptAt())
+                .isEqualTo(
+                        processing
+                                .updatedAt()
+                                .plus(processingPolicy.retryDelay(claim.attemptCount())));
+    }
+
+    @Test
     void theFifthFailureBecomesDead() {
         EventFixture fixture = createPendingEvent("fifth-failure");
         seedRetriedPending(fixture.eventId(), 4, CLAIMED_AT.minusSeconds(1));
@@ -366,6 +451,26 @@ class TelemetryProcessingWorkerIntegrationTest {
         assertThat(row.lastErrorMessage())
                 .isEqualTo("Processing failed; another attempt may be scheduled.");
         assertThat(row.updatedAt()).isEqualTo(failedAt);
+    }
+
+    @Test
+    void aFifthFailureBeforeCreationCannotRegressTheDeadLifecycle() {
+        EventFixture fixture = createPendingEvent("dead-clock-rollback");
+        seedRetriedPending(fixture.eventId(), 4, CLAIMED_AT.minusSeconds(1));
+        TelemetryProcessingClaim fifth =
+                lifecycleService.claimNext("worker-a", CLAIMED_AT).orElseThrow();
+        ProcessingRow processing = readEvent(fixture.eventId());
+
+        assertThat(lifecycleService.recordFailure(fifth, CREATED_AT.minusSeconds(60)))
+                .isEqualTo(TelemetryProcessingFailureDisposition.DEAD);
+
+        ProcessingRow dead = readEvent(fixture.eventId());
+        assertThat(dead.status()).isEqualTo("DEAD");
+        assertThat(dead.attemptCount()).isEqualTo(5);
+        assertThat(dead.deadAt())
+                .isAfterOrEqualTo(CREATED_AT)
+                .isAfterOrEqualTo(processing.updatedAt());
+        assertThat(dead.updatedAt()).isEqualTo(dead.deadAt());
     }
 
     @Test

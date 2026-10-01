@@ -416,6 +416,75 @@ class ProcessingEventOperationsApiIntegrationTest {
     }
 
     @Test
+    @DisplayName("EVT-01/02: clock rollback preserves readable dead-event timestamps")
+    void aRolledBackFinalFailureStillReturnsAChronologicalDeadEvent() throws Exception {
+        insertPendingEvent(
+                NORTHSTAR_DEAD_EVENT_ID, NORTHSTAR_DEAD_BATCH_ID, NORTHSTAR_ID, CREATED_AT);
+        Instant claimedAt = CREATED_AT;
+        for (int attempt = 1; attempt <= 5; attempt++) {
+            TelemetryProcessingClaim claim =
+                    lifecycleService.claimNext("rollback-worker", claimedAt).orElseThrow();
+            assertThat(claim.attemptCount()).isEqualTo(attempt);
+            Instant failedAt = attempt == 5 ? CREATED_AT.minusSeconds(1) : claimedAt.plusSeconds(1);
+            assertThat(lifecycleService.recordFailure(claim, failedAt))
+                    .isEqualTo(
+                            attempt == 5
+                                    ? TelemetryProcessingFailureDisposition.DEAD
+                                    : TelemetryProcessingFailureDisposition.RETRY_SCHEDULED);
+            if (attempt < 5) {
+                claimedAt = readEvent(NORTHSTAR_DEAD_EVENT_ID).nextAttemptAt();
+            }
+        }
+
+        JsonNode payload = listDead(login("admin@northstar.example").session(), null);
+        assertThat(payload.path("events").size()).isOne();
+        JsonNode event = payload.path("events").get(0);
+        assertThat(event.path("id").asText()).isEqualTo(NORTHSTAR_DEAD_EVENT_ID.toString());
+        assertThat(Instant.parse(event.path("createdAt").asText())).isEqualTo(CREATED_AT);
+        assertThat(Instant.parse(event.path("deadAt").asText())).isEqualTo(claimedAt);
+        assertThat(Instant.parse(event.path("updatedAt").asText())).isEqualTo(claimedAt);
+        assertSafePayload(payload);
+    }
+
+    @Test
+    @DisplayName("EVT-02: manual retry preserves the prior lifecycle time after clock rollback")
+    void manualRetryAfterClockRollbackWaitsForThePersistedLifecycleTime() throws Exception {
+        Instant createdAt =
+                Instant.now().plusSeconds(60).truncatedTo(java.time.temporal.ChronoUnit.SECONDS);
+        Instant deadAt = createdAt.plusSeconds(60);
+        Instant updatedAt = deadAt.plusSeconds(1);
+        insertDeadEvent(
+                NORTHSTAR_DEAD_EVENT_ID, NORTHSTAR_DEAD_BATCH_ID, NORTHSTAR_ID, createdAt, deadAt);
+        jdbcClient
+                .sql(
+                        "UPDATE telemetry_processing_event SET updated_at = :updatedAt WHERE id = :eventId")
+                .param("updatedAt", updatedAt.atOffset(ZoneOffset.UTC))
+                .param("eventId", NORTHSTAR_DEAD_EVENT_ID)
+                .update();
+        AuthenticatedSession admin = login("admin@northstar.example");
+        TableCounts before = tableCounts();
+
+        MvcResult result =
+                mockMvc.perform(retry(admin, NORTHSTAR_DEAD_EVENT_ID))
+                        .andExpect(status().isNoContent())
+                        .andReturn();
+
+        ProcessingRow retried = readEvent(NORTHSTAR_DEAD_EVENT_ID);
+        assertFreshPending(retried);
+        assertThat(retried.updatedAt()).isEqualTo(updatedAt);
+        assertThat(retried.nextAttemptAt()).isEqualTo(updatedAt);
+        assertThat(tableCounts()).isEqualTo(before);
+        assertRetryAudit(result);
+        assertThat(lifecycleService.claimNext("retry-worker", updatedAt.minusNanos(1_000)))
+                .isEmpty();
+        assertThat(readEvent(NORTHSTAR_DEAD_EVENT_ID)).isEqualTo(retried);
+        TelemetryProcessingClaim claim =
+                lifecycleService.claimNext("retry-worker", updatedAt).orElseThrow();
+        assertThat(claim.event().id()).isEqualTo(NORTHSTAR_DEAD_EVENT_ID);
+        assertThat(claim.attemptCount()).isOne();
+    }
+
+    @Test
     void concurrentRetriesAdmitExactlyOneWinnerAndAuditOnlyThatRequest() throws Exception {
         insertDeadEvent(
                 NORTHSTAR_DEAD_EVENT_ID,
