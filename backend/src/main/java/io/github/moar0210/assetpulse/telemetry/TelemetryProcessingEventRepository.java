@@ -135,8 +135,8 @@ public class TelemetryProcessingEventRepository {
                 claim_token = NULL,
                 claim_owner = NULL,
                 lease_expires_at = NULL,
-                completed_at = :completedAt,
-                updated_at = :completedAt,
+                completed_at = GREATEST(:completedAt, created_at, updated_at),
+                updated_at = GREATEST(:completedAt, created_at, updated_at),
                 last_error_code = NULL,
                 last_error_message = NULL
             WHERE id = :eventId
@@ -153,16 +153,19 @@ public class TelemetryProcessingEventRepository {
                 END,
                 next_attempt_at = CASE
                     WHEN attempt_count >= :maxAttempts THEN NULL
-                    ELSE CAST(:nextAttemptAt AS TIMESTAMP WITH TIME ZONE)
+                    ELSE GREATEST(:failedAt, created_at, updated_at)
+                        + (CAST(:nextAttemptAt AS TIMESTAMP WITH TIME ZONE)
+                            - CAST(:failedAt AS TIMESTAMP WITH TIME ZONE))
                 END,
                 claim_token = NULL,
                 claim_owner = NULL,
                 lease_expires_at = NULL,
                 dead_at = CASE
-                    WHEN attempt_count >= :maxAttempts THEN :failedAt
+                    WHEN attempt_count >= :maxAttempts
+                        THEN GREATEST(:failedAt, created_at, updated_at)
                     ELSE NULL
                 END,
-                updated_at = :failedAt,
+                updated_at = GREATEST(:failedAt, created_at, updated_at),
                 last_error_code = :errorCode,
                 last_error_message = :errorMessage
             WHERE id = :eventId

@@ -5,23 +5,29 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.ApplicationContext;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
@@ -56,6 +62,7 @@ class TelemetryProcessingWorkerIntegrationTest {
     @Autowired private TelemetryProcessingEventRepository eventRepository;
     @Autowired private TelemetryProcessingLifecycleService lifecycleService;
     @Autowired private TelemetryProcessingExecutionService executionService;
+    @Autowired private TelemetryProcessingPolicy processingPolicy;
     @Autowired private TransactionTemplate transactionTemplate;
 
     @BeforeEach
@@ -208,6 +215,140 @@ class TelemetryProcessingWorkerIntegrationTest {
         assertThat(row.updatedAt()).isEqualTo(CLAIMED_AT);
     }
 
+    @ParameterizedTest
+    @ValueSource(ints = {1, 5})
+    void anExecutingHandlerKeepsItsExpiredLeaseWhileUnrelatedWorkCanBeClaimed(int attemptCount)
+            throws Exception {
+        EventFixture executing = createPendingEvent("handler-across-expiry");
+        if (attemptCount > 1) {
+            seedRetriedPending(executing.eventId(), attemptCount - 1, CLAIMED_AT);
+        }
+        TelemetryProcessingClaim claim =
+                lifecycleService.claimNext("worker-a", CLAIMED_AT).orElseThrow();
+        ProcessingRow processing = readEvent(executing.eventId());
+        CountDownLatch handlerStarted = new CountDownLatch(1);
+        CountDownLatch releaseHandler = new CountDownLatch(1);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+
+        try {
+            Future<Boolean> execution =
+                    executor.submit(
+                            () ->
+                                    executionService.execute(
+                                            claim,
+                                            event -> {
+                                                updateBatchKey(
+                                                        event.telemetryBatchId(),
+                                                        "handler-across-expiry-effect");
+                                                handlerStarted.countDown();
+                                                await(releaseHandler);
+                                            }));
+            assertThat(handlerStarted.await(5, TimeUnit.SECONDS)).isTrue();
+
+            Future<Optional<TelemetryProcessingClaim>> expiredClaim =
+                    executor.submit(
+                            () -> lifecycleService.claimNext("worker-b", claim.leaseExpiresAt()));
+            assertThat(expiredClaim.get(5, TimeUnit.SECONDS)).isEmpty();
+
+            EventFixture unrelated = createPendingEvent("due-during-handler");
+            Future<Optional<TelemetryProcessingClaim>> nextClaim =
+                    executor.submit(
+                            () -> lifecycleService.claimNext("worker-b", claim.leaseExpiresAt()));
+            TelemetryProcessingClaim next = nextClaim.get(5, TimeUnit.SECONDS).orElseThrow();
+            assertThat(next.event().id()).isEqualTo(unrelated.eventId());
+            assertThat(next.attemptCount()).isOne();
+            assertThat(readEvent(executing.eventId())).isEqualTo(processing);
+            assertThat(readBatchKey(executing.batchId())).isEqualTo("handler-across-expiry");
+
+            releaseHandler.countDown();
+            assertThat(execution.get(5, TimeUnit.SECONDS)).isTrue();
+
+            ProcessingRow completed = readEvent(executing.eventId());
+            assertThat(completed.status()).isEqualTo("COMPLETED");
+            assertThat(completed.attemptCount()).isEqualTo(attemptCount);
+            assertThat(completed.claimToken()).isNull();
+            assertThat(completed.deadAt()).isNull();
+            assertThat(completed.lastErrorCode()).isNull();
+            assertThat(readBatchKey(executing.batchId())).isEqualTo("handler-across-expiry-effect");
+        } finally {
+            releaseHandler.countDown();
+            stopExecutor(executor);
+        }
+    }
+
+    @Test
+    void duplicateExecutionWaitsForTheClaimLockAndDoesNotRepeatTheHandler() throws Exception {
+        EventFixture fixture = createPendingEvent("duplicate-execution");
+        TelemetryProcessingClaim claim =
+                lifecycleService.claimNext("worker-a", CLAIMED_AT).orElseThrow();
+        AtomicInteger handlerCalls = new AtomicInteger();
+        CompletableFuture<Integer> firstBackend = new CompletableFuture<>();
+        CompletableFuture<Integer> duplicateBackend = new CompletableFuture<>();
+        CountDownLatch releaseHandler = new CountDownLatch(1);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+
+        try {
+            Future<Boolean> first =
+                    executor.submit(
+                            () ->
+                                    executionService.execute(
+                                            claim,
+                                            event -> {
+                                                handlerCalls.incrementAndGet();
+                                                updateBatchKey(
+                                                        event.telemetryBatchId(),
+                                                        "first-execution-effect");
+                                                firstBackend.complete(currentBackendPid());
+                                                await(releaseHandler);
+                                            }));
+            int firstPid = firstBackend.get(5, TimeUnit.SECONDS);
+            Future<Boolean> duplicate =
+                    executor.submit(
+                            () ->
+                                    transactionTemplate.execute(
+                                            status -> {
+                                                jdbcClient
+                                                        .sql("SET LOCAL lock_timeout = '10s'")
+                                                        .update();
+                                                duplicateBackend.complete(currentBackendPid());
+                                                return executionService.execute(
+                                                        claim,
+                                                        event -> {
+                                                            handlerCalls.incrementAndGet();
+                                                            updateBatchKey(
+                                                                    event.telemetryBatchId(),
+                                                                    "duplicate-execution-effect");
+                                                        });
+                                            }));
+            int duplicatePid = duplicateBackend.get(5, TimeUnit.SECONDS);
+            assertThat(duplicatePid).isNotEqualTo(firstPid);
+            org.awaitility.Awaitility.await()
+                    .atMost(Duration.ofSeconds(5))
+                    .until(
+                            () ->
+                                    jdbcClient
+                                            .sql(
+                                                    "SELECT :firstPid = ANY(pg_blocking_pids(:duplicatePid))")
+                                            .param("firstPid", firstPid)
+                                            .param("duplicatePid", duplicatePid)
+                                            .query(Boolean.class)
+                                            .single());
+            assertThat(handlerCalls).hasValue(1);
+            assertThat(readBatchKey(fixture.batchId())).isEqualTo("duplicate-execution");
+
+            releaseHandler.countDown();
+            assertThat(first.get(5, TimeUnit.SECONDS)).isTrue();
+            assertThat(duplicate.get(5, TimeUnit.SECONDS)).isFalse();
+            assertThat(handlerCalls).hasValue(1);
+            assertThat(readBatchKey(fixture.batchId())).isEqualTo("first-execution-effect");
+            assertThat(readEvent(fixture.eventId()).status()).isEqualTo("COMPLETED");
+            assertThat(readEvent(fixture.eventId()).attemptCount()).isOne();
+        } finally {
+            releaseHandler.countDown();
+            stopExecutor(executor);
+        }
+    }
+
     @Test
     void anExpiredLeaseIsRecoveredWithANewTokenAndAttempt() {
         EventFixture fixture = createPendingEvent("expired-lease");
@@ -284,6 +425,29 @@ class TelemetryProcessingWorkerIntegrationTest {
     }
 
     @Test
+    void completionCannotPrecedeThePersistedClaimAfterClockRollback() {
+        EventFixture fixture = createPendingEvent("completion-clock-rollback");
+        TelemetryProcessingClaim claim =
+                lifecycleService.claimNext("worker-a", Instant.now().plusSeconds(60)).orElseThrow();
+        ProcessingRow processing = readEvent(fixture.eventId());
+
+        assertThat(
+                        executionService.execute(
+                                claim,
+                                event ->
+                                        updateBatchKey(
+                                                event.telemetryBatchId(),
+                                                "completion-clock-rollback-effect")))
+                .isTrue();
+
+        assertThat(readBatchKey(fixture.batchId())).isEqualTo("completion-clock-rollback-effect");
+        ProcessingRow completed = readEvent(fixture.eventId());
+        assertThat(completed.status()).isEqualTo("COMPLETED");
+        assertThat(completed.completedAt()).isAfterOrEqualTo(processing.updatedAt());
+        assertThat(completed.updatedAt()).isEqualTo(completed.completedAt());
+    }
+
+    @Test
     void aFailingHandlerRollsBackBeforeAFixedSafeFailureSchedulesTheExactRetry() {
         EventFixture fixture = createPendingEvent("failing-handler");
         TelemetryProcessingClaim claim =
@@ -342,6 +506,161 @@ class TelemetryProcessingWorkerIntegrationTest {
     }
 
     @Test
+    void aFailedCompletionWriteRollsBackTheHandlerEffectAndAllowsRetry() {
+        EventFixture fixture = createPendingEvent("completion-write-failure");
+        TelemetryProcessingClaim claim =
+                lifecycleService.claimNext("worker-a", CLAIMED_AT).orElseThrow();
+        ProcessingRow processing = readEvent(fixture.eventId());
+        AtomicBoolean handlerFinished = new AtomicBoolean();
+
+        try {
+            jdbcClient
+                    .sql(
+                            """
+                            CREATE FUNCTION reject_test_processing_completion()
+                            RETURNS TRIGGER LANGUAGE plpgsql AS $$
+                            BEGIN
+                                IF NEW.status = 'COMPLETED' THEN
+                                    RAISE EXCEPTION 'Test completion update rejected'
+                                        USING ERRCODE = '23514';
+                                END IF;
+                                RETURN NEW;
+                            END;
+                            $$
+                            """)
+                    .update();
+            jdbcClient
+                    .sql(
+                            """
+                            CREATE TRIGGER reject_test_processing_completion
+                            BEFORE UPDATE ON telemetry_processing_event
+                            FOR EACH ROW EXECUTE FUNCTION reject_test_processing_completion()
+                            """)
+                    .update();
+
+            assertThatThrownBy(
+                            () ->
+                                    executionService.execute(
+                                            claim,
+                                            event -> {
+                                                updateBatchKey(
+                                                        event.telemetryBatchId(),
+                                                        "uncommitted-handler-effect");
+                                                assertThat(readBatchKey(event.telemetryBatchId()))
+                                                        .isEqualTo("uncommitted-handler-effect");
+                                                handlerFinished.set(true);
+                                            }))
+                    .isInstanceOf(DataIntegrityViolationException.class)
+                    .hasStackTraceContaining("Test completion update rejected");
+
+            assertThat(handlerFinished).isTrue();
+            assertThat(readBatchKey(fixture.batchId())).isEqualTo("completion-write-failure");
+            assertThat(readEvent(fixture.eventId())).isEqualTo(processing);
+        } finally {
+            try {
+                jdbcClient
+                        .sql(
+                                """
+                                DROP TRIGGER IF EXISTS reject_test_processing_completion
+                                ON telemetry_processing_event
+                                """)
+                        .update();
+            } finally {
+                jdbcClient
+                        .sql("DROP FUNCTION IF EXISTS reject_test_processing_completion()")
+                        .update();
+            }
+        }
+
+        Instant failedAt = CLAIMED_AT.plusSeconds(2);
+        assertThat(lifecycleService.recordFailure(claim, failedAt))
+                .isEqualTo(TelemetryProcessingFailureDisposition.RETRY_SCHEDULED);
+        ProcessingRow pending = readEvent(fixture.eventId());
+        assertThat(pending.status()).isEqualTo("PENDING");
+        assertThat(pending.nextAttemptAt()).isEqualTo(failedAt.plusSeconds(5));
+        assertThat(pending.lastErrorCode()).isEqualTo("PROCESSING_FAILED");
+        assertThat(pending.lastErrorMessage())
+                .isEqualTo("Processing failed; another attempt may be scheduled.");
+
+        TelemetryProcessingClaim retry =
+                lifecycleService.claimNext("worker-b", pending.nextAttemptAt()).orElseThrow();
+        assertThat(retry.claimToken()).isNotEqualTo(claim.claimToken());
+        assertThat(retry.attemptCount()).isEqualTo(2);
+        assertThat(
+                        executionService.execute(
+                                retry,
+                                event ->
+                                        updateBatchKey(
+                                                event.telemetryBatchId(),
+                                                "retried-completion-effect")))
+                .isTrue();
+        assertThat(readBatchKey(fixture.batchId())).isEqualTo("retried-completion-effect");
+        assertThat(readEvent(fixture.eventId()).status()).isEqualTo("COMPLETED");
+        assertThat(readEvent(fixture.eventId()).lastErrorCode()).isNull();
+    }
+
+    @Test
+    void aRetryableFailureAfterClockRollbackPreservesTheClaimTimeAndRetryDelay() {
+        EventFixture fixture = createPendingEvent("retry-clock-rollback");
+        TelemetryProcessingClaim claim =
+                lifecycleService.claimNext("worker-a", CLAIMED_AT).orElseThrow();
+        for (int attempt = 1; attempt < processingPolicy.maxAttempts(); attempt++) {
+            ProcessingRow processing = readEvent(fixture.eventId());
+            Instant expectedNextAttemptAt =
+                    processing.updatedAt().plus(processingPolicy.retryDelay(attempt));
+
+            assertThat(
+                            lifecycleService.recordFailure(
+                                    claim, processing.updatedAt().minusSeconds(60)))
+                    .isEqualTo(TelemetryProcessingFailureDisposition.RETRY_SCHEDULED);
+
+            ProcessingRow retry = readEvent(fixture.eventId());
+            assertThat(retry.status()).isEqualTo("PENDING");
+            assertThat(retry.updatedAt()).isEqualTo(processing.updatedAt());
+            assertThat(retry.nextAttemptAt()).isEqualTo(expectedNextAttemptAt);
+            assertThat(lifecycleService.claimNext("worker-b", expectedNextAttemptAt.minusMillis(1)))
+                    .isEmpty();
+            assertThat(readEvent(fixture.eventId())).isEqualTo(retry);
+
+            TelemetryProcessingClaim retried =
+                    lifecycleService.claimNext("worker-b", expectedNextAttemptAt).orElseThrow();
+            assertThat(retried.event().id()).isEqualTo(fixture.eventId());
+            assertThat(retried.attemptCount()).isEqualTo(attempt + 1);
+            assertThat(retried.claimToken()).isNotEqualTo(claim.claimToken());
+            claim = retried;
+        }
+    }
+
+    @Test
+    void aRetryableFailureAcrossDaylightSavingRollbackKeepsTheExactRetryDelay() {
+        EventFixture fixture = createPendingEvent("retry-daylight-saving-rollback");
+        TelemetryProcessingClaim claim =
+                lifecycleService
+                        .claimNext("worker-a", Instant.parse("2026-11-02T06:00:00Z"))
+                        .orElseThrow();
+        ProcessingRow processing = readEvent(fixture.eventId());
+
+        ProcessingRow retry =
+                transactionTemplate.execute(
+                        status -> {
+                            jdbcClient.sql("SET LOCAL TIME ZONE 'America/New_York'").update();
+                            assertThat(
+                                            lifecycleService.recordFailure(
+                                                    claim, Instant.parse("2026-10-31T06:00:00Z")))
+                                    .isEqualTo(
+                                            TelemetryProcessingFailureDisposition.RETRY_SCHEDULED);
+                            return readEvent(fixture.eventId());
+                        });
+
+        assertThat(retry.updatedAt()).isEqualTo(processing.updatedAt());
+        assertThat(retry.nextAttemptAt())
+                .isEqualTo(
+                        processing
+                                .updatedAt()
+                                .plus(processingPolicy.retryDelay(claim.attemptCount())));
+    }
+
+    @Test
     void theFifthFailureBecomesDead() {
         EventFixture fixture = createPendingEvent("fifth-failure");
         seedRetriedPending(fixture.eventId(), 4, CLAIMED_AT.minusSeconds(1));
@@ -366,6 +685,26 @@ class TelemetryProcessingWorkerIntegrationTest {
         assertThat(row.lastErrorMessage())
                 .isEqualTo("Processing failed; another attempt may be scheduled.");
         assertThat(row.updatedAt()).isEqualTo(failedAt);
+    }
+
+    @Test
+    void aFifthFailureBeforeCreationCannotRegressTheDeadLifecycle() {
+        EventFixture fixture = createPendingEvent("dead-clock-rollback");
+        seedRetriedPending(fixture.eventId(), 4, CLAIMED_AT.minusSeconds(1));
+        TelemetryProcessingClaim fifth =
+                lifecycleService.claimNext("worker-a", CLAIMED_AT).orElseThrow();
+        ProcessingRow processing = readEvent(fixture.eventId());
+
+        assertThat(lifecycleService.recordFailure(fifth, CREATED_AT.minusSeconds(60)))
+                .isEqualTo(TelemetryProcessingFailureDisposition.DEAD);
+
+        ProcessingRow dead = readEvent(fixture.eventId());
+        assertThat(dead.status()).isEqualTo("DEAD");
+        assertThat(dead.attemptCount()).isEqualTo(5);
+        assertThat(dead.deadAt())
+                .isAfterOrEqualTo(CREATED_AT)
+                .isAfterOrEqualTo(processing.updatedAt());
+        assertThat(dead.updatedAt()).isEqualTo(dead.deadAt());
     }
 
     @Test
@@ -404,6 +743,18 @@ class TelemetryProcessingWorkerIntegrationTest {
                     }
                     return lifecycleService.claimNext(owner, CLAIMED_AT);
                 });
+    }
+
+    private int currentBackendPid() {
+        return jdbcClient.sql("SELECT pg_backend_pid()").query(Integer.class).single();
+    }
+
+    private void stopExecutor(ExecutorService executor) throws InterruptedException {
+        executor.shutdown();
+        if (!executor.awaitTermination(10, TimeUnit.SECONDS)) {
+            executor.shutdownNow();
+            assertThat(executor.awaitTermination(10, TimeUnit.SECONDS)).isTrue();
+        }
     }
 
     private void await(CountDownLatch latch) {

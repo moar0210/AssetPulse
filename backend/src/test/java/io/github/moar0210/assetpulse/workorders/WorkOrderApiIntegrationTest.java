@@ -2,6 +2,8 @@ package io.github.moar0210.assetpulse.workorders;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.head;
@@ -15,12 +17,14 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.moar0210.assetpulse.identity.AuthenticatedActor;
 import io.github.moar0210.assetpulse.identity.DatabaseUserDetailsService;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -1002,6 +1006,208 @@ class WorkOrderApiIntegrationTest {
     }
 
     @Test
+    @DisplayName(
+            "WO-02–05, AUTH-04: competing assignments retain only the committed owner's access")
+    void competingDifferentAssigneesWaitForTheWinnerAndCannotTakeItsOwnership() throws Exception {
+        insertAlert(NORTHSTAR_ALERT_ONE_ID, NORTHSTAR_ID, NORTHSTAR_RULE_ONE_ID, "OPEN", 1);
+        insertOpenWorkOrder(
+                NORTHSTAR_WORK_ORDER_ONE_ID, NORTHSTAR_ID, NORTHSTAR_ALERT_ONE_ID, CREATED_AT);
+        insertTestTechnician(NORTHSTAR_SECOND_TECHNICIAN_ID, NORTHSTAR_ID, 2);
+        AuthenticatedSession firstAdmin = login("admin@northstar.example");
+        AuthenticatedSession secondAdmin = login("admin@northstar.example");
+        AuthenticatedSession winner = login("technician@northstar.example");
+        AuthenticatedSession loser = login("workorder-test-002@example.test");
+        AssignmentRace race = pauseCompetingAssignments();
+
+        try (ExecutorService executor = Executors.newFixedThreadPool(2)) {
+            try {
+                Future<MvcResult> first =
+                        executor.submit(
+                                () ->
+                                        mockMvc.perform(
+                                                        assign(
+                                                                firstAdmin,
+                                                                NORTHSTAR_WORK_ORDER_ONE_ID,
+                                                                NORTHSTAR_TECHNICIAN_ID,
+                                                                0L))
+                                                .andReturn());
+                int firstPid = race.firstBackend().get(5, TimeUnit.SECONDS);
+                Future<MvcResult> second =
+                        executor.submit(
+                                () ->
+                                        mockMvc.perform(
+                                                        assign(
+                                                                secondAdmin,
+                                                                NORTHSTAR_WORK_ORDER_ONE_ID,
+                                                                NORTHSTAR_SECOND_TECHNICIAN_ID,
+                                                                0L))
+                                                .andReturn());
+                assertAssignmentBlockedBy(race, firstPid);
+                assertOpenUnchanged(NORTHSTAR_WORK_ORDER_ONE_ID);
+                assertThat(workOrderAuditRows()).isEmpty();
+
+                race.releaseFirst().countDown();
+                MvcResult committed = first.get(5, TimeUnit.SECONDS);
+                assertThat(committed.getResponse().getStatus()).isEqualTo(200);
+                JsonNode assigned = payload(committed);
+                assertExactWorkOrder(
+                        assigned,
+                        NORTHSTAR_WORK_ORDER_ONE_ID,
+                        NORTHSTAR_ALERT_ONE_ID,
+                        "ASSIGNED",
+                        1,
+                        true);
+                MvcResult conflict = second.get(5, TimeUnit.SECONDS);
+                assertThat(conflict.getResponse().getStatus()).isEqualTo(409);
+                assertThat(payload(conflict).path("code").asText())
+                        .isEqualTo("WORK_ORDER_STATE_CONFLICT");
+                assertThat(detail(firstAdmin.session(), NORTHSTAR_WORK_ORDER_ONE_ID))
+                        .isEqualTo(assigned);
+                assertThat(detail(winner.session(), NORTHSTAR_WORK_ORDER_ONE_ID))
+                        .isEqualTo(assigned);
+                assertWorkOrderAudit(
+                        committed,
+                        NORTHSTAR_WORK_ORDER_ONE_ID,
+                        "WORK_ORDER_ASSIGNED",
+                        NORTHSTAR_ADMIN_ID);
+                assertThat(count("work_order_status_history")).isOne();
+                assertThat(workOrderAuditRows()).hasSize(1);
+
+                problem(
+                        get(WORK_ORDERS_PATH + "/" + NORTHSTAR_WORK_ORDER_ONE_ID)
+                                .session(loser.session()),
+                        404,
+                        "WORK_ORDER_NOT_FOUND");
+                mockMvc.perform(get(WORK_ORDERS_PATH).session(loser.session()))
+                        .andExpect(status().isOk())
+                        .andExpect(jsonPath("$.workOrders.length()").value(0));
+                problem(
+                        command(loser, NORTHSTAR_WORK_ORDER_ONE_ID, "start", 1),
+                        404,
+                        "WORK_ORDER_NOT_FOUND");
+                for (long version : List.of(0L, 1L)) {
+                    problem(
+                            assign(
+                                    secondAdmin,
+                                    NORTHSTAR_WORK_ORDER_ONE_ID,
+                                    NORTHSTAR_SECOND_TECHNICIAN_ID,
+                                    version),
+                            409,
+                            "WORK_ORDER_STATE_CONFLICT");
+                }
+                assertThat(detail(firstAdmin.session(), NORTHSTAR_WORK_ORDER_ONE_ID))
+                        .isEqualTo(assigned);
+                assertThat(count("work_order_status_history")).isOne();
+                assertThat(workOrderAuditRows()).hasSize(1);
+                mockMvc.perform(command(winner, NORTHSTAR_WORK_ORDER_ONE_ID, "start", 1))
+                        .andExpect(status().isOk())
+                        .andExpect(
+                                jsonPath("$.assignedTechnician.id")
+                                        .value(NORTHSTAR_TECHNICIAN_ID.toString()));
+            } finally {
+                race.releaseFirst().countDown();
+            }
+        }
+    }
+
+    @Test
+    @DisplayName("WO-02–05, AUD-01: an audit-rejected assignment yields to a waiting valid command")
+    void failedAssignmentRollsBackBeforeTheWaitingDifferentAssigneeCanWin() throws Exception {
+        insertAlert(NORTHSTAR_ALERT_ONE_ID, NORTHSTAR_ID, NORTHSTAR_RULE_ONE_ID, "OPEN", 1);
+        insertOpenWorkOrder(
+                NORTHSTAR_WORK_ORDER_ONE_ID, NORTHSTAR_ID, NORTHSTAR_ALERT_ONE_ID, CREATED_AT);
+        insertTestTechnician(NORTHSTAR_SECOND_TECHNICIAN_ID, NORTHSTAR_ID, 2);
+        AuthenticatedSession failedOwner = login("technician@northstar.example");
+        AuthenticatedSession committedOwner = login("workorder-test-002@example.test");
+        String rejectedCorrelation = UUID.randomUUID().toString();
+        String committedCorrelation = UUID.randomUUID().toString();
+        jdbcClient
+                .sql(
+                        "ALTER TABLE audit_event ADD CONSTRAINT ck_work_order_test_assignment_audit CHECK (correlation_id <> '"
+                                + rejectedCorrelation
+                                + "'::uuid) NOT VALID")
+                .update();
+        AssignmentRace race = pauseCompetingAssignments();
+
+        try (ExecutorService executor = Executors.newFixedThreadPool(2)) {
+            try {
+                Future<WorkOrderDetailResponse> first =
+                        executor.submit(
+                                () ->
+                                        workOrderService.assign(
+                                                NORTHSTAR_ID,
+                                                NORTHSTAR_ADMIN_ID,
+                                                NORTHSTAR_WORK_ORDER_ONE_ID,
+                                                new AssignWorkOrderRequest(
+                                                        NORTHSTAR_TECHNICIAN_ID, 0L),
+                                                rejectedCorrelation));
+                int firstPid = race.firstBackend().get(5, TimeUnit.SECONDS);
+                Future<WorkOrderDetailResponse> second =
+                        executor.submit(
+                                () ->
+                                        workOrderService.assign(
+                                                NORTHSTAR_ID,
+                                                NORTHSTAR_ADMIN_ID,
+                                                NORTHSTAR_WORK_ORDER_ONE_ID,
+                                                new AssignWorkOrderRequest(
+                                                        NORTHSTAR_SECOND_TECHNICIAN_ID, 0L),
+                                                committedCorrelation));
+                assertAssignmentBlockedBy(race, firstPid);
+                assertOpenUnchanged(NORTHSTAR_WORK_ORDER_ONE_ID);
+                assertThat(workOrderAuditRows()).isEmpty();
+
+                race.releaseFirst().countDown();
+                assertThatThrownBy(() -> first.get(5, TimeUnit.SECONDS))
+                        .hasCauseInstanceOf(DataIntegrityViolationException.class)
+                        .hasStackTraceContaining("ck_work_order_test_assignment_audit");
+                WorkOrderDetailResponse committed = second.get(5, TimeUnit.SECONDS);
+                assertThat(committed.status()).isEqualTo(WorkOrderStatus.ASSIGNED);
+                assertThat(committed.version()).isEqualTo(1);
+                assertThat(committed.alertId()).isEqualTo(NORTHSTAR_ALERT_ONE_ID);
+                assertThat(committed.assignedTechnician().id())
+                        .isEqualTo(NORTHSTAR_SECOND_TECHNICIAN_ID);
+                assertThat(committed.history()).hasSize(1);
+                assertThat(committed.history().getFirst().actor().id())
+                        .isEqualTo(NORTHSTAR_ADMIN_ID);
+                assertThat(committed.history().getFirst().transitionedAt())
+                        .isEqualTo(committed.updatedAt());
+                assertThat(count("work_order_status_history")).isOne();
+                assertThat(workOrderAuditRows()).hasSize(1);
+                assertThat(
+                                jdbcClient
+                                        .sql(
+                                                "SELECT correlation_id FROM audit_event WHERE subject_work_order_id = :workOrderId")
+                                        .param("workOrderId", NORTHSTAR_WORK_ORDER_ONE_ID)
+                                        .query(UUID.class)
+                                        .single())
+                        .isEqualTo(UUID.fromString(committedCorrelation));
+                JsonNode authoritative =
+                        detail(committedOwner.session(), NORTHSTAR_WORK_ORDER_ONE_ID);
+                assertThat(authoritative.path("assignedTechnician").path("id").asText())
+                        .isEqualTo(NORTHSTAR_SECOND_TECHNICIAN_ID.toString());
+                problem(
+                        command(failedOwner, NORTHSTAR_WORK_ORDER_ONE_ID, "start", 1),
+                        404,
+                        "WORK_ORDER_NOT_FOUND");
+                assertThat(detail(committedOwner.session(), NORTHSTAR_WORK_ORDER_ONE_ID))
+                        .isEqualTo(authoritative);
+                mockMvc.perform(command(committedOwner, NORTHSTAR_WORK_ORDER_ONE_ID, "start", 1))
+                        .andExpect(status().isOk())
+                        .andExpect(
+                                jsonPath("$.assignedTechnician.id")
+                                        .value(NORTHSTAR_SECOND_TECHNICIAN_ID.toString()));
+            } finally {
+                race.releaseFirst().countDown();
+            }
+        } finally {
+            jdbcClient
+                    .sql(
+                            "ALTER TABLE audit_event DROP CONSTRAINT ck_work_order_test_assignment_audit")
+                    .update();
+        }
+    }
+
+    @Test
     void assignmentHistoryFailureRollsBackAssignmentVersionAndTimestamps() {
         insertAlert(NORTHSTAR_ALERT_ONE_ID, NORTHSTAR_ID, NORTHSTAR_RULE_ONE_ID, "OPEN", 1);
         insertOpenWorkOrder(
@@ -1199,6 +1405,71 @@ class WorkOrderApiIntegrationTest {
                 action,
                 "{\"expectedVersion\":" + expectedVersion + "}");
     }
+
+    private AssignmentRace pauseCompetingAssignments() {
+        CompletableFuture<Integer> firstBackend = new CompletableFuture<>();
+        CompletableFuture<Integer> secondBackend = new CompletableFuture<>();
+        CountDownLatch releaseFirst = new CountDownLatch(1);
+        doAnswer(
+                        invocation -> {
+                            Object updated = invocation.callRealMethod();
+                            firstBackend.complete(
+                                    jdbcClient
+                                            .sql("SELECT pg_backend_pid()")
+                                            .query(Integer.class)
+                                            .single());
+                            if (!releaseFirst.await(15, TimeUnit.SECONDS)) {
+                                throw new IllegalStateException(
+                                        "Timed out waiting to release assignment");
+                            }
+                            return updated;
+                        })
+                .when(repository)
+                .assign(
+                        eq(NORTHSTAR_ID),
+                        eq(NORTHSTAR_WORK_ORDER_ONE_ID),
+                        eq(NORTHSTAR_TECHNICIAN_ID),
+                        eq(0L),
+                        any(Instant.class));
+        doAnswer(
+                        invocation -> {
+                            jdbcClient.sql("SET LOCAL lock_timeout = '15s'").update();
+                            secondBackend.complete(
+                                    jdbcClient
+                                            .sql("SELECT pg_backend_pid()")
+                                            .query(Integer.class)
+                                            .single());
+                            return invocation.callRealMethod();
+                        })
+                .when(repository)
+                .assign(
+                        eq(NORTHSTAR_ID),
+                        eq(NORTHSTAR_WORK_ORDER_ONE_ID),
+                        eq(NORTHSTAR_SECOND_TECHNICIAN_ID),
+                        eq(0L),
+                        any(Instant.class));
+        return new AssignmentRace(firstBackend, secondBackend, releaseFirst);
+    }
+
+    private void assertAssignmentBlockedBy(AssignmentRace race, int firstPid) throws Exception {
+        int secondPid = race.secondBackend().get(5, TimeUnit.SECONDS);
+        assertThat(secondPid).isNotEqualTo(firstPid);
+        org.awaitility.Awaitility.await()
+                .atMost(Duration.ofSeconds(5))
+                .until(
+                        () ->
+                                jdbcClient
+                                        .sql("SELECT :firstPid = ANY(pg_blocking_pids(:secondPid))")
+                                        .param("firstPid", firstPid)
+                                        .param("secondPid", secondPid)
+                                        .query(Boolean.class)
+                                        .single());
+    }
+
+    private record AssignmentRace(
+            CompletableFuture<Integer> firstBackend,
+            CompletableFuture<Integer> secondBackend,
+            CountDownLatch releaseFirst) {}
 
     private MockHttpServletRequestBuilder rawCommand(
             AuthenticatedSession authenticated, UUID workOrderId, String action, String body) {
