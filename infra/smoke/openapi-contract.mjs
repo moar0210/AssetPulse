@@ -1442,6 +1442,22 @@ function validateProblemResponses(document, operations) {
   }
 }
 
+function validatePersistenceFailureResponses(operations) {
+  for (const expected of EXPECTED_OPENAPI_OPERATIONS) {
+    const requiresPersistence =
+      (expected.tenantScoped && expected.path !== "/api/v1/alerts/stream") ||
+      (expected.path === "/api/v1/session" && expected.method !== "get");
+    if (!requiresPersistence) {
+      continue;
+    }
+    const key = operationKey(expected.method, expected.path);
+    assert(
+      operations.get(key).operation.responses["503"] !== undefined,
+      `${key} must document a 503 persistence failure response`,
+    );
+  }
+}
+
 function validateNoStoreResponses(document, operations) {
   const reusableHeader = dereference(
     document,
@@ -1752,6 +1768,7 @@ export function parseAndValidateOpenApiDocument(raw) {
   validateSuccessResponses(document, operations);
   validateProblemSchema(document);
   validateProblemResponses(document, operations);
+  validatePersistenceFailureResponses(operations);
   validateNoStoreResponses(document, operations);
   validateImplementedResponseHeaders(document, operations);
   validateSseContract(document, operations);
