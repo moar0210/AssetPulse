@@ -3,6 +3,7 @@ package io.github.moar0210.assetpulse.dashboard;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.not;
+import static org.mockito.Mockito.doAnswer;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.user;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
@@ -12,14 +13,24 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.moar0210.assetpulse.alerts.AlertCommandService;
 import io.github.moar0210.assetpulse.audit.AuditAction;
 import io.github.moar0210.assetpulse.identity.DatabaseUserDetailsService;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -28,8 +39,10 @@ import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.security.core.userdetails.User;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
@@ -98,6 +111,8 @@ class DashboardApiIntegrationTest {
     @Autowired private ObjectMapper objectMapper;
     @Autowired private JdbcClient jdbcClient;
     @Autowired private DatabaseUserDetailsService users;
+    @Autowired private AlertCommandService alertCommandService;
+    @MockitoSpyBean private DashboardRepository repository;
 
     @BeforeEach
     void createDashboardFixtures() {
@@ -313,6 +328,66 @@ class DashboardApiIntegrationTest {
                 .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
                 .andExpect(jsonPath("$.code").value("ACCESS_DENIED"))
                 .andExpect(content().string(not(containsString("assetCount"))));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"admin@northstar.example", "technician@northstar.example"})
+    @DisplayName(
+            "AUD-01: dashboard counts and activity share a snapshot across a committed command")
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    void countsAndActivityRemainConsistentDuringAConcurrentCommand(String email) throws Exception {
+        CountDownLatch countsRead = new CountDownLatch(1);
+        CountDownLatch allowActivity = new CountDownLatch(1);
+        AtomicBoolean firstRead = new AtomicBoolean(true);
+        boolean technicianScoped = email.startsWith("technician@");
+        UUID actorId = technicianScoped ? NORTHSTAR_TECHNICIAN_ID : NORTHSTAR_ADMIN_ID;
+        try {
+            JsonNode before = getDashboard(email);
+            doAnswer(
+                            invocation -> {
+                                if (firstRead.compareAndSet(true, false)) {
+                                    countsRead.countDown();
+                                    if (!allowActivity.await(10, TimeUnit.SECONDS)) {
+                                        throw new IllegalStateException(
+                                                "Timed out waiting to read dashboard activity");
+                                    }
+                                }
+                                return invocation.callRealMethod();
+                            })
+                    .when(repository)
+                    .findRecentActivity(NORTHSTAR_ID, actorId, technicianScoped, 5);
+            try (ExecutorService executor = Executors.newSingleThreadExecutor()) {
+                Future<JsonNode> inFlight = executor.submit(() -> getDashboard(email));
+                try {
+                    assertThat(countsRead.await(10, TimeUnit.SECONDS)).isTrue();
+                    alertCommandService.acknowledge(
+                            NORTHSTAR_ID,
+                            NORTHSTAR_ADMIN_ID,
+                            OPEN_ALERT_ID,
+                            UUID.randomUUID().toString());
+                    JsonNode committed = getDashboard(email);
+                    assertThat(committed.path("openAlertCount").asLong()).isZero();
+                    assertThat(committed.path("recentActivity").get(0).path("action").asText())
+                            .isEqualTo("ALERT_ACKNOWLEDGED");
+                    assertThat(committed.path("recentActivity").get(0).path("subjectId").asText())
+                            .isEqualTo(OPEN_ALERT_ID.toString());
+                    allowActivity.countDown();
+                    assertThat(inFlight.get(10, TimeUnit.SECONDS)).isEqualTo(before);
+                } finally {
+                    allowActivity.countDown();
+                }
+            }
+            assertThat(getDashboard(email).path("openAlertCount").asLong()).isZero();
+        } finally {
+            jdbcClient
+                    .sql(
+                            "TRUNCATE TABLE audit_event, work_order_status_history, work_order, alert_status_history, alert")
+                    .update();
+            jdbcClient
+                    .sql("DELETE FROM app_user WHERE id = :id")
+                    .param("id", OTHER_TECHNICIAN_ID)
+                    .update();
+        }
     }
 
     private JsonNode getDashboard(String email) throws Exception {
