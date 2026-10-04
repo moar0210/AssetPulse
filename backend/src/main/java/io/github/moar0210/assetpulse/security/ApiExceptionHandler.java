@@ -29,6 +29,7 @@ import io.github.moar0210.assetpulse.workorders.WorkOrderStateConflictException;
 import jakarta.servlet.http.HttpServletRequest;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import org.springframework.dao.DataAccessException;
 import org.springframework.http.CacheControl;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
@@ -36,6 +37,7 @@ import org.springframework.http.MediaType;
 import org.springframework.http.ProblemDetail;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
+import org.springframework.transaction.TransactionException;
 import org.springframework.validation.FieldError;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
@@ -49,6 +51,17 @@ public class ApiExceptionHandler {
 
     public ApiExceptionHandler(ApiProblemWriter problemWriter) {
         this.problemWriter = problemWriter;
+    }
+
+    @ExceptionHandler({DataAccessException.class, TransactionException.class})
+    ResponseEntity<ProblemDetail> persistenceUnavailable(HttpServletRequest request) {
+        return problem(
+                request,
+                HttpStatus.SERVICE_UNAVAILABLE,
+                "API_UNAVAILABLE",
+                "API unavailable",
+                "The request outcome could not be confirmed. Refresh the current state before"
+                        + " retrying.");
     }
 
     @ExceptionHandler(AuthenticationFailedException.class)

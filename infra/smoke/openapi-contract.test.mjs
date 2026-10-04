@@ -671,6 +671,59 @@ test("SSE framing, problem details, and no-store responses cannot drift", () => 
   );
 });
 
+test("persistence-backed reads and commands require a documented 503 response", () => {
+  const persistenceOperations = [
+    ["post", "/api/v1/session"],
+    ["delete", "/api/v1/session"],
+    ["get", "/api/v1/dashboard"],
+    ["post", "/api/v1/demo/reset"],
+    ["get", "/api/v1/audit-events"],
+    ["get", "/api/v1/assets"],
+    ["get", "/api/v1/assets/{assetId}"],
+    ["get", "/api/v1/sensors/{sensorId}/telemetry-readings"],
+    ["post", "/api/v1/telemetry-batches"],
+    ["get", "/api/v1/alerts"],
+    ["get", "/api/v1/alerts/{alertId}"],
+    ["post", "/api/v1/alerts/{alertId}/acknowledge"],
+    ["post", "/api/v1/alerts/{alertId}/resolve"],
+    ["get", "/api/v1/work-orders"],
+    ["post", "/api/v1/work-orders"],
+    ["get", "/api/v1/work-orders/eligible-technicians"],
+    ["get", "/api/v1/work-orders/{workOrderId}"],
+    ["post", "/api/v1/work-orders/{workOrderId}/assign"],
+    ["post", "/api/v1/work-orders/{workOrderId}/start"],
+    ["post", "/api/v1/work-orders/{workOrderId}/complete"],
+    ["get", "/api/v1/processing-events/dead"],
+    ["post", "/api/v1/processing-events/{eventId}/retry"],
+  ];
+
+  for (const [method, route] of persistenceOperations) {
+    assertInvalid(
+      validDocument,
+      (document) => {
+        delete operationAt(document, method, route).responses["503"];
+      },
+      /must document a 503 persistence failure response/u,
+    );
+  }
+});
+
+test("process and in-memory reads do not require persistence failure responses", () => {
+  const document = structuredClone(validDocument);
+  for (const route of [
+    "/api/v1/status",
+    "/api/v1/session/csrf",
+    "/api/v1/session",
+    "/api/v1/alerts/stream",
+  ]) {
+    delete operationAt(document, "get", route).responses["503"];
+  }
+  assert.deepEqual(
+    parseAndValidateOpenApiDocument(JSON.stringify(document)),
+    document,
+  );
+});
+
 test("implemented correlation, creation, and streaming headers cannot drift", () => {
   assertInvalid(
     validDocument,
