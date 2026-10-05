@@ -562,15 +562,18 @@ describe("seeded session application", () => {
 
     render(<App />);
     await openAssets();
-    fireEvent.click(
-      await screen.findByRole("button", {
-        name: "View details for Boiler Feed Pump (PUMP-101)",
-      }),
-    );
+    const assetRow = await screen.findByRole("button", {
+      name: "View details for Boiler Feed Pump (PUMP-101)",
+    });
+    assetRow.focus();
+    fireEvent.click(assetRow);
 
     expect(
       await screen.findByRole("heading", { name: "Boiler Feed Pump" }),
     ).toBeInTheDocument();
+    expect(
+      screen.getByRole("region", { name: "Boiler Feed Pump" }),
+    ).toHaveFocus();
     expect(screen.getByText("Read-only")).toBeInTheDocument();
     expect(
       screen.getByRole("heading", { name: "Sensor configuration" }),
@@ -586,7 +589,9 @@ describe("seeded session application", () => {
     expect(screen.getByText("Enabled")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Sign out" })).toBeEnabled();
 
-    fireEvent.click(screen.getByRole("button", { name: "Back to assets" }));
+    const backButton = screen.getByRole("button", { name: "Back to assets" });
+    backButton.focus();
+    fireEvent.click(backButton);
 
     expect(
       await screen.findByRole("heading", { name: "Assets" }),
@@ -596,8 +601,177 @@ describe("seeded session application", () => {
         name: "View details for Boiler Feed Pump (PUMP-101)",
       }),
     ).toBeEnabled();
+    expect(
+      screen.getByRole("button", {
+        name: "View details for Boiler Feed Pump (PUMP-101)",
+      }),
+    ).toHaveFocus();
     expect(screen.queryByText("PUMP-101-TEMP")).toBeNull();
   });
+
+  it("focuses loading asset details without stealing focus when the response arrives", async () => {
+    let resolveDetail!: (response: Response) => void;
+    const pendingDetail = new Promise<Response>((resolve) => {
+      resolveDetail = resolve;
+    });
+    installFetch(async (url) => {
+      if (url === "/api/v1/status") return statusResponse();
+      if (url === "/api/v1/session/csrf") return jsonResponse(csrfToken);
+      if (url === `/api/v1/assets/${assetDetail.id}`) return pendingDetail;
+      return jsonResponse(identity);
+    });
+
+    render(<App />);
+    await openAssets();
+    const assetRow = await screen.findByRole("button", {
+      name: "View details for Boiler Feed Pump (PUMP-101)",
+    });
+    assetRow.focus();
+    fireEvent.click(assetRow);
+
+    expect(screen.getByRole("region", { name: "Asset details" })).toHaveFocus();
+    const backButton = screen.getByRole("button", { name: "Back to assets" });
+    backButton.focus();
+    await act(async () => resolveDetail(jsonResponse(assetDetail)));
+
+    expect(
+      screen.getByRole("heading", { name: "Boiler Feed Pump" }),
+    ).toBeVisible();
+    expect(backButton).toHaveFocus();
+  });
+
+  it("restores focus to the originating second asset after Back", async () => {
+    installFetch(async (url) => {
+      if (url === "/api/v1/status") return statusResponse();
+      if (url === "/api/v1/session/csrf") return jsonResponse(csrfToken);
+      if (url === `/api/v1/assets/${assets[1].id}`) {
+        return jsonResponse({ ...assets[1], sensors: [] });
+      }
+      return jsonResponse(identity);
+    });
+
+    render(<App />);
+    await openAssets();
+    const rowName = "View details for Cooling Water Pump (PUMP-102)";
+    const assetRow = await screen.findByRole("button", { name: rowName });
+    assetRow.focus();
+    fireEvent.click(assetRow);
+    await screen.findByRole("heading", { name: "Cooling Water Pump" });
+
+    const backButton = screen.getByRole("button", { name: "Back to assets" });
+    backButton.focus();
+    fireEvent.click(backButton);
+
+    expect(screen.getByRole("button", { name: rowName })).toHaveFocus();
+    expect(
+      screen.getByRole("button", {
+        name: "View details for Boiler Feed Pump (PUMP-101)",
+      }),
+    ).not.toHaveFocus();
+  });
+
+  it("aborts departed asset details and keeps navigation focus after a late response", async () => {
+    let resolveDetail!: (response: Response) => void;
+    let detailSignal: AbortSignal | null | undefined;
+    const pendingDetail = new Promise<Response>((resolve) => {
+      resolveDetail = resolve;
+    });
+    installFetch(async (url, init) => {
+      if (url === "/api/v1/status") return statusResponse();
+      if (url === "/api/v1/session/csrf") return jsonResponse(csrfToken);
+      if (url === `/api/v1/assets/${assetDetail.id}`) {
+        detailSignal = init?.signal;
+        return pendingDetail;
+      }
+      return jsonResponse(identity);
+    });
+
+    render(<App />);
+    await openAssets();
+    const assetRow = await screen.findByRole("button", {
+      name: "View details for Boiler Feed Pump (PUMP-101)",
+    });
+    assetRow.focus();
+    fireEvent.click(assetRow);
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Loading asset details",
+    );
+
+    const dashboardNavigation = screen.getByRole("button", {
+      name: "Dashboard",
+    });
+    dashboardNavigation.focus();
+    fireEvent.click(dashboardNavigation);
+    expect(detailSignal?.aborted).toBe(true);
+    await act(async () => resolveDetail(jsonResponse(assetDetail)));
+
+    expect(dashboardNavigation).toHaveFocus();
+    expect(dashboardNavigation).toHaveAttribute("aria-current", "page");
+    expect(
+      screen.queryByRole("heading", { name: "Boiler Feed Pump" }),
+    ).toBeNull();
+  });
+
+  it.each(["restore row", "preserve navigation"] as const)(
+    "keeps Back focus while the asset list reloads, then %s",
+    async (focusOutcome) => {
+      let assetRequests = 0;
+      let resolveAssets!: (response: Response) => void;
+      const pendingAssets = new Promise<Response>((resolve) => {
+        resolveAssets = resolve;
+      });
+      installFetch(
+        async (url) => {
+          if (url === "/api/v1/status") return statusResponse();
+          if (url === "/api/v1/session/csrf") return jsonResponse(csrfToken);
+          if (url === `/api/v1/assets/${assets[1].id}`) {
+            return jsonResponse({ ...assets[1], sensors: [] });
+          }
+          return jsonResponse(identity);
+        },
+        async () => {
+          assetRequests += 1;
+          return assetRequests === 1 ? jsonResponse({ assets }) : pendingAssets;
+        },
+      );
+
+      render(<App />);
+      await openAssets();
+      const rowName = "View details for Cooling Water Pump (PUMP-102)";
+      const assetRow = await screen.findByRole("button", { name: rowName });
+      assetRow.focus();
+      fireEvent.click(assetRow);
+      await screen.findByRole("heading", { name: "Cooling Water Pump" });
+
+      const dashboardNavigation = screen.getByRole("button", {
+        name: "Dashboard",
+      });
+      dashboardNavigation.focus();
+      fireEvent.click(dashboardNavigation);
+      const assetsNavigation = screen.getByRole("button", { name: "Assets" });
+      assetsNavigation.focus();
+      fireEvent.click(assetsNavigation);
+      expect(assetRequests).toBe(2);
+
+      const backButton = screen.getByRole("button", { name: "Back to assets" });
+      backButton.focus();
+      fireEvent.click(backButton);
+      expect(screen.getByRole("status")).toHaveTextContent("Loading assets");
+      expect(screen.getByRole("region", { name: "Assets" })).toHaveFocus();
+
+      if (focusOutcome === "preserve navigation") {
+        dashboardNavigation.focus();
+      }
+      await act(async () => resolveAssets(jsonResponse({ assets })));
+
+      const returnedRow = screen.getByRole("button", { name: rowName });
+      expect(returnedRow).toBeVisible();
+      expect(
+        focusOutcome === "restore row" ? returnedRow : dashboardNavigation,
+      ).toHaveFocus();
+      expect(assetRequests).toBe(2);
+    },
+  );
 
   it("shows the empty threshold-rule state for a configured sensor", async () => {
     const ruleFreeAssetDetail = {
@@ -704,45 +878,71 @@ describe("seeded session application", () => {
     ).toBeEnabled();
   });
 
-  it("retries an unavailable asset detail without discarding identity", async () => {
-    let detailRequests = 0;
-    installFetch(async (url) => {
-      if (url === "/api/v1/status") {
-        return statusResponse();
-      }
-      if (url === "/api/v1/session/csrf") {
-        return jsonResponse(csrfToken);
-      }
-      if (url === `/api/v1/assets/${assetDetail.id}`) {
-        detailRequests += 1;
-        return detailRequests === 1
-          ? jsonResponse({}, 503)
-          : jsonResponse(assetDetail);
-      }
-      return jsonResponse(identity);
-    });
+  it.each(["success", "failure"] as const)(
+    "keeps asset-detail retry focus after %s without discarding identity",
+    async (outcome) => {
+      let detailRequests = 0;
+      let resolveDetail!: (response: Response) => void;
+      const pendingDetail = new Promise<Response>((resolve) => {
+        resolveDetail = resolve;
+      });
+      installFetch(async (url) => {
+        if (url === "/api/v1/status") {
+          return statusResponse();
+        }
+        if (url === "/api/v1/session/csrf") {
+          return jsonResponse(csrfToken);
+        }
+        if (url === `/api/v1/assets/${assetDetail.id}`) {
+          detailRequests += 1;
+          return detailRequests === 1 ? jsonResponse({}, 503) : pendingDetail;
+        }
+        return jsonResponse(identity);
+      });
 
-    render(<App />);
-    await openAssets();
-    fireEvent.click(
-      await screen.findByRole("button", {
-        name: "View details for Boiler Feed Pump (PUMP-101)",
-      }),
-    );
+      render(<App />);
+      await openAssets();
+      fireEvent.click(
+        await screen.findByRole("button", {
+          name: "View details for Boiler Feed Pump (PUMP-101)",
+        }),
+      );
 
-    expect(await screen.findByRole("alert")).toHaveTextContent(
-      "could not load this asset",
-    );
-    expect(screen.getByText("Northstar Operations")).toBeInTheDocument();
-    fireEvent.click(
-      screen.getByRole("button", { name: "Retry asset details" }),
-    );
+      expect(await screen.findByRole("alert")).toHaveTextContent(
+        "could not load this asset",
+      );
+      expect(screen.getByText("Northstar Operations")).toBeInTheDocument();
+      const retryButton = screen.getByRole("button", {
+        name: "Retry asset details",
+      });
+      retryButton.focus();
+      fireEvent.click(retryButton);
 
-    expect(
-      await screen.findByRole("heading", { name: "Boiler Feed Pump" }),
-    ).toBeInTheDocument();
-    expect(detailRequests).toBe(2);
-  });
+      expect(
+        screen.getByRole("region", { name: "Asset details" }),
+      ).toHaveFocus();
+      await act(async () =>
+        resolveDetail(
+          outcome === "success"
+            ? jsonResponse(assetDetail)
+            : jsonResponse({}, 503),
+        ),
+      );
+
+      const detailName =
+        outcome === "success"
+          ? "Boiler Feed Pump"
+          : "Asset details unavailable";
+      expect(screen.getByRole("region", { name: detailName })).toHaveFocus();
+      expect(screen.getByText("Northstar Operations")).toBeInTheDocument();
+      if (outcome === "failure") {
+        expect(
+          screen.getByRole("button", { name: "Retry asset details" }),
+        ).toBeEnabled();
+      }
+      expect(detailRequests).toBe(2);
+    },
+  );
 
   it("renders a generic non-leaking asset not-found state", async () => {
     installFetch(async (url) => {

@@ -1,4 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import type { FormEvent } from "react";
 
 import {
@@ -365,6 +371,11 @@ function AssetDetailPanel({
     kind: "loading",
   });
   const [loadAttempt, setLoadAttempt] = useState(0);
+  const detailFocus = useRef<HTMLElement>(null);
+
+  useLayoutEffect(() => {
+    detailFocus.current?.focus();
+  }, [assetId, loadAttempt]);
 
   useEffect(() => {
     let active = true;
@@ -411,6 +422,8 @@ function AssetDetailPanel({
     <section
       className="asset-section asset-detail"
       aria-labelledby="asset-detail-title"
+      ref={detailFocus}
+      tabIndex={-1}
     >
       <button
         className="secondary-button secondary-button--compact asset-back"
@@ -591,6 +604,30 @@ function AuthenticatedPanel({
   const [workspaceView, setWorkspaceView] =
     useState<WorkspaceView>("dashboard");
   const alertsNavigationRef = useRef<HTMLButtonElement>(null);
+  const originatingAssetId = useRef<string | null>(null);
+  const assetRowButtons = useRef(new Map<string, HTMLButtonElement>());
+  const assetListFocus = useRef<HTMLElement>(null);
+
+  useLayoutEffect(() => {
+    if (
+      workspaceView === "assets" &&
+      selectedAssetId === null &&
+      originatingAssetId.current !== null
+    ) {
+      const originatingRow = assetRowButtons.current.get(
+        originatingAssetId.current,
+      );
+      if (
+        document.activeElement === document.body ||
+        document.activeElement === assetListFocus.current
+      ) {
+        (originatingRow ?? assetListFocus.current)?.focus();
+      }
+      if (originatingRow !== undefined || assetState.kind === "ready") {
+        originatingAssetId.current = null;
+      }
+    }
+  }, [assetState, selectedAssetId, workspaceView]);
 
   useEffect(() => {
     if (workspaceView !== "assets") {
@@ -733,7 +770,12 @@ function AuthenticatedPanel({
 
       {workspaceView === "assets" &&
         (selectedAssetId === null ? (
-          <section className="asset-section" aria-labelledby="assets-title">
+          <section
+            className="asset-section"
+            aria-labelledby="assets-title"
+            ref={assetListFocus}
+            tabIndex={-1}
+          >
             <div className="asset-section__heading">
               <div>
                 <p className="eyebrow">Protected inventory</p>
@@ -764,7 +806,17 @@ function AuthenticatedPanel({
                       className="asset-row-button"
                       type="button"
                       aria-label={`View details for ${asset.name} (${asset.assetCode})`}
-                      onClick={() => setSelectedAssetId(asset.id)}
+                      ref={(element) => {
+                        if (element === null) {
+                          assetRowButtons.current.delete(asset.id);
+                        } else {
+                          assetRowButtons.current.set(asset.id, element);
+                        }
+                      }}
+                      onClick={() => {
+                        originatingAssetId.current = asset.id;
+                        setSelectedAssetId(asset.id);
+                      }}
                     >
                       <span className="asset-name">{asset.name}</span>
                       <span className="asset-row-button__meta">
