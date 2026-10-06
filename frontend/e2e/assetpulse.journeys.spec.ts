@@ -193,11 +193,22 @@ test.describe("AssetPulse v0.6 product journeys", () => {
     }
 
     await openProductSection(page, "Assets", "Space");
-    await activateWithKeyboard(
-      page.getByRole("button", {
-        name: "View details for Boiler Feed Pump (PUMP-101)",
-      }),
+    const assetRow = page.getByRole("button", {
+      name: "View details for Boiler Feed Pump (PUMP-101)",
+    });
+    const assetDetailRegion = page.locator(
+      '[aria-labelledby="asset-detail-title"]',
     );
+    await activateWithKeyboard(assetRow);
+    await expect(assetDetailRegion).toBeFocused();
+    await page.keyboard.press("Tab");
+    await expect(
+      page.getByRole("button", { name: "Back to assets", exact: true }),
+    ).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(assetRow).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(assetDetailRegion).toBeFocused();
     await expect(
       page.getByRole("heading", { level: 2, name: "Boiler Feed Pump" }),
     ).toBeVisible();

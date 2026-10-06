@@ -1099,6 +1099,7 @@ code {
   margin-bottom: 0.25rem;
 }
 
+.asset-section:focus,
 .alert-detail:focus {
   outline: 3px solid #d3a74a;
   outline-offset: 3px;
