@@ -1732,3 +1732,256 @@ describe("operations workspace navigation", () => {
     ).toBe(false);
   });
 });
+
+it("keeps a fresh sign-in when an older logout discovery response arrives", async () => {
+  let authenticated = true;
+  let logoutStarted = false;
+  let holdNextSessionRead = false;
+  let releaseAssetRead!: (response: Response) => void;
+  let releaseOldSessionRead!: (response: Response) => void;
+  const assetRead = new Promise<Response>((resolve) => {
+    releaseAssetRead = resolve;
+  });
+  const oldSessionRead = new Promise<Response>((resolve) => {
+    releaseOldSessionRead = resolve;
+  });
+  installFetch(
+    async (url, init) => {
+      if (url === "/api/v1/status") return statusResponse();
+      if (url === "/api/v1/session/csrf") return jsonResponse(csrfToken);
+      if (init?.method === "DELETE") {
+        logoutStarted = true;
+        authenticated = false;
+        holdNextSessionRead = true;
+        return new Response(null, { status: 204 });
+      }
+      if (init?.method === "POST") {
+        authenticated = true;
+        return jsonResponse(identity);
+      }
+      if (url === "/api/v1/session" && holdNextSessionRead) {
+        holdNextSessionRead = false;
+        return oldSessionRead;
+      }
+      return authenticated ? jsonResponse(identity) : jsonResponse({}, 401);
+    },
+    async () => assetRead,
+  );
+
+  render(<App />);
+  await openAssets();
+  fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
+  await waitFor(() => expect(logoutStarted).toBe(true));
+  await act(async () => releaseAssetRead(jsonResponse({}, 401)));
+  await screen.findByRole("button", { name: "Sign in" });
+  fireEvent.change(screen.getByLabelText("Email"), {
+    target: { value: "admin@northstar.example" },
+  });
+  fireEvent.change(screen.getByLabelText("Password"), {
+    target: { value: "AssetPulse1!" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+  await screen.findByRole("heading", { name: "Welcome, Nora Admin" });
+
+  await act(async () => releaseOldSessionRead(jsonResponse({}, 401)));
+  expect(authenticated).toBe(true);
+  expect(
+    screen.getByRole("heading", { name: "Welcome, Nora Admin" }),
+  ).toBeVisible();
+});
+
+it("does not replay an older expired logout against a fresh sign-in", async () => {
+  let authenticated = true;
+  let deleteCalls = 0;
+  let releaseAssetRead!: (response: Response) => void;
+  let releaseOldLogout!: (response: Response) => void;
+  const assetRead = new Promise<Response>((resolve) => {
+    releaseAssetRead = resolve;
+  });
+  const oldLogout = new Promise<Response>((resolve) => {
+    releaseOldLogout = resolve;
+  });
+  installFetch(
+    async (url, init) => {
+      if (url === "/api/v1/status") return statusResponse();
+      if (url === "/api/v1/session/csrf") return jsonResponse(csrfToken);
+      if (init?.method === "DELETE") {
+        deleteCalls += 1;
+        authenticated = false;
+        return deleteCalls === 1
+          ? oldLogout
+          : new Response(null, { status: 204 });
+      }
+      if (init?.method === "POST") {
+        authenticated = true;
+        return jsonResponse(identity);
+      }
+      return authenticated ? jsonResponse(identity) : jsonResponse({}, 401);
+    },
+    async () => assetRead,
+  );
+
+  render(<App />);
+  await openAssets();
+  fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
+  await waitFor(() => expect(deleteCalls).toBe(1));
+  await act(async () => releaseAssetRead(jsonResponse({}, 401)));
+  await screen.findByRole("button", { name: "Sign in" });
+  fireEvent.change(screen.getByLabelText("Email"), {
+    target: { value: "admin@northstar.example" },
+  });
+  fireEvent.change(screen.getByLabelText("Password"), {
+    target: { value: "AssetPulse1!" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+  await screen.findByRole("heading", { name: "Welcome, Nora Admin" });
+
+  await act(async () => releaseOldLogout(jsonResponse({}, 403)));
+  expect(deleteCalls).toBe(1);
+  expect(authenticated).toBe(true);
+  expect(
+    screen.getByRole("heading", { name: "Welcome, Nora Admin" }),
+  ).toBeVisible();
+});
+
+it.each(["discovery", "login", "logout"] as const)(
+  "cancels pending %s on cleanup without continuing recovery",
+  async (operation) => {
+    let operationSignal: AbortSignal | null | undefined;
+    let releaseResponse!: (response: Response) => void;
+    const pendingResponse = new Promise<Response>((resolve) => {
+      releaseResponse = resolve;
+    });
+    const fetchMock = installFetch(async (url, init) => {
+      if (url === "/api/v1/status") return statusResponse();
+      if (
+        (operation === "discovery" && url === "/api/v1/session/csrf") ||
+        init?.method === "POST" ||
+        init?.method === "DELETE"
+      ) {
+        operationSignal = init?.signal;
+        return pendingResponse;
+      }
+      if (url === "/api/v1/session/csrf") return jsonResponse(csrfToken);
+      return operation === "login"
+        ? jsonResponse({}, 401)
+        : jsonResponse(identity);
+    });
+    const { unmount } = render(<App />);
+    if (operation === "login") {
+      await screen.findByRole("button", { name: "Sign in" });
+      fireEvent.change(screen.getByLabelText("Email"), {
+        target: { value: identity.email },
+      });
+      fireEvent.change(screen.getByLabelText("Password"), {
+        target: { value: "AssetPulse1!" },
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+    } else if (operation === "logout") {
+      fireEvent.click(await screen.findByRole("button", { name: "Sign out" }));
+    }
+    await waitFor(() => expect(operationSignal).toBeDefined());
+    const requestsBeforeCleanup = fetchMock.mock.calls.length;
+    unmount();
+    expect(operationSignal?.aborted).toBe(true);
+    await act(async () => {
+      releaseResponse(
+        operation === "discovery"
+          ? jsonResponse(csrfToken)
+          : operation === "login"
+            ? jsonResponse(identity)
+            : new Response(null, { status: 204 }),
+      );
+    });
+    expect(fetchMock.mock.calls).toHaveLength(requestsBeforeCleanup);
+  },
+);
+
+it.each(["expired CSRF", "lost completed response"] as const)(
+  "preserves current logout recovery after %s",
+  async (failure) => {
+    let authenticated = true;
+    let csrfRequests = 0;
+    let logoutRequests = 0;
+    const fetchMock = installFetch(async (url, init) => {
+      if (url === "/api/v1/status") return statusResponse();
+      if (url === "/api/v1/session/csrf") {
+        csrfRequests += 1;
+        return jsonResponse({
+          ...csrfToken,
+          token: `csrf-token-${csrfRequests}`,
+        });
+      }
+      if (init?.method === "DELETE") {
+        logoutRequests += 1;
+        if (logoutRequests === 1 && failure === "expired CSRF") {
+          return jsonResponse({}, 403);
+        }
+        authenticated = false;
+        if (failure === "lost completed response") {
+          throw new TypeError("Connection closed after logout completed");
+        }
+        return new Response(null, { status: 204 });
+      }
+      return authenticated ? jsonResponse(identity) : jsonResponse({}, 401);
+    });
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Sign out" }));
+    expect(
+      await screen.findByRole("button", { name: "Sign in" }),
+    ).toBeEnabled();
+    const expectedRequests = failure === "expired CSRF" ? 2 : 1;
+    expect(logoutRequests).toBe(expectedRequests);
+    expect(csrfRequests).toBe(expectedRequests + 1);
+    const deleteRequests = fetchMock.mock.calls.filter(
+      ([url, init]) => url === "/api/v1/session" && init?.method === "DELETE",
+    );
+    deleteRequests.forEach(([, init], index) => {
+      expect(init?.headers).toEqual(
+        expect.objectContaining({ "X-CSRF-TOKEN": `csrf-token-${index + 1}` }),
+      );
+    });
+  },
+);
+
+it("bounds current logout at five seconds and retries discovery without replay", async () => {
+  let logoutSignal: AbortSignal | null | undefined;
+  const fetchMock = installFetch(async (url, init) => {
+    if (url === "/api/v1/status") return statusResponse();
+    if (url === "/api/v1/session/csrf") return jsonResponse(csrfToken);
+    if (init?.method === "DELETE") {
+      logoutSignal = init.signal;
+      return new Promise<Response>((_, reject) => {
+        init.signal?.addEventListener(
+          "abort",
+          () => reject(new DOMException("Aborted", "AbortError")),
+          { once: true },
+        );
+      });
+    }
+    return jsonResponse(identity);
+  });
+  render(<App />);
+  await screen.findByRole("button", { name: "Sign out" });
+  vi.useFakeTimers();
+  try {
+    fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
+    await act(async () => vi.advanceTimersByTimeAsync(4_999));
+    expect(logoutSignal?.aborted).toBe(false);
+    expect(screen.getByRole("button", { name: "Signing out…" })).toBeDisabled();
+    await act(async () => vi.advanceTimersByTimeAsync(1));
+    expect(logoutSignal?.aborted).toBe(true);
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "could not load your session",
+    );
+  } finally {
+    vi.useRealTimers();
+  }
+  fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+  expect(
+    await screen.findByRole("heading", { name: "Welcome, Nora Admin" }),
+  ).toBeVisible();
+  expect(
+    fetchMock.mock.calls.filter(([, init]) => init?.method === "DELETE"),
+  ).toHaveLength(1);
+});
