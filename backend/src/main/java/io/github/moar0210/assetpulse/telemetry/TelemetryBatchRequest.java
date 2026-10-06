@@ -33,6 +33,9 @@ public record TelemetryBatchRequest(
             @NotNull @PastOrPresent Instant observedAt) {
 
         public Reading {
+            if (value != null) {
+                value = value.stripTrailingZeros();
+            }
             if (observedAt != null && !TelemetryTimestampRange.contains(observedAt)) {
                 throw new IllegalArgumentException(
                         "Observation time is outside the supported range");

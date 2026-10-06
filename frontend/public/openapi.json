@@ -2079,7 +2079,8 @@
             "type": "number",
             "minimum": -1000000000000,
             "maximum": 1000000000000,
-            "multipleOf": 0.000001
+            "multipleOf": 0.000001,
+            "description": "Must be an exact multiple of 0.000001 within the stated bounds. Insignificant trailing zeros do not affect validation or retry identity; values are never rounded to fit."
           },
           "observedAt": {
             "type": "string",
