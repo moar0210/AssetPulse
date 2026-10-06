@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useId, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 
 import {
   DEFAULT_DEAD_PROCESSING_EVENT_LIMIT,
@@ -281,7 +288,7 @@ export function OperationsPanel({
     };
   }, [cancelQueueRead, readQueue]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (selectedEvent !== null) {
       detailFocus.current?.focus();
       return;
@@ -295,14 +302,14 @@ export function OperationsPanel({
     }
   }, [selectedEventId]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (focusFeedbackAfterUpdate.current && actionFeedback !== null) {
       focusFeedbackAfterUpdate.current = false;
       feedbackFocus.current?.focus();
     }
   }, [actionFeedback]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (selectedEventPresence === "unknown") {
       feedbackFocus.current?.focus();
     }
