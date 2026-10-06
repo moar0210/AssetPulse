@@ -52,13 +52,14 @@ type ApplicationState =
 
 type LoginOutcome =
   | "authenticated"
+  | "superseded"
   | "invalid-credentials"
   | "unavailable"
   | Readonly<{
       kind: "rate-limited";
       retryAfterSeconds: number | null;
     }>;
-type LogoutOutcome = "logged-out" | "unavailable";
+type LogoutOutcome = "logged-out" | "unavailable" | "superseded";
 type WorkspaceView =
   "dashboard" | "assets" | "alerts" | "work-orders" | "operations";
 
@@ -81,15 +82,22 @@ type DiscoveredSession = Readonly<{
   identity: SessionIdentity | null;
 }>;
 
+type SessionOperation = Readonly<{
+  id: number;
+  controller: AbortController;
+}>;
+
 async function withApiTimeout<T>(
+  controller: AbortController,
   operation: (signal: AbortSignal) => Promise<T>,
   timeoutMs = API_TIMEOUT_MS,
 ): Promise<T> {
-  const controller = new AbortController();
   const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    return await operation(controller.signal);
+    const result = await operation(controller.signal);
+    controller.signal.throwIfAborted();
+    return result;
   } finally {
     window.clearTimeout(timeoutId);
   }
@@ -98,8 +106,11 @@ async function withApiTimeout<T>(
 async function discoverSession(
   signal: AbortSignal,
 ): Promise<DiscoveredSession> {
+  signal.throwIfAborted();
   const csrfToken = await getCsrfToken(signal);
+  signal.throwIfAborted();
   const identity = await getCurrentSession(signal);
+  signal.throwIfAborted();
   return { csrfToken, identity };
 }
 
@@ -111,6 +122,7 @@ async function createSessionWithRecovery(
   let csrfToken = initialCsrfToken;
 
   for (let attempt = 0; attempt < 2; attempt += 1) {
+    signal.throwIfAborted();
     try {
       await login(request, csrfToken, signal);
     } catch (error: unknown) {
@@ -145,6 +157,7 @@ async function destroySessionWithRecovery(
   let csrfToken = initialCsrfToken;
 
   for (let attempt = 0; attempt < 2; attempt += 1) {
+    signal.throwIfAborted();
     try {
       await logout(csrfToken, signal);
     } catch (error: unknown) {
@@ -943,52 +956,90 @@ function App() {
     kind: "loading",
   });
   const [bootstrapAttempt, setBootstrapAttempt] = useState(0);
+  const sessionOperationRef = useRef<SessionOperation | null>(null);
+  const sessionOperationIdRef = useRef(0);
+
+  const cancelSessionOperation = useCallback(() => {
+    sessionOperationRef.current?.controller.abort();
+    sessionOperationRef.current = null;
+    sessionOperationIdRef.current += 1;
+  }, []);
+
+  const beginSessionOperation = useCallback((): SessionOperation => {
+    cancelSessionOperation();
+    const operation = {
+      id: sessionOperationIdRef.current,
+      controller: new AbortController(),
+    };
+    sessionOperationRef.current = operation;
+    return operation;
+  }, [cancelSessionOperation]);
+
+  const isCurrentSessionOperation = useCallback(
+    (operation: SessionOperation) =>
+      sessionOperationRef.current?.id === operation.id,
+    [],
+  );
 
   const handleSessionExpired = useCallback(() => {
+    cancelSessionOperation();
     setApplicationState({ kind: "loading" });
     setApiState("checking");
     setBootstrapAttempt((attempt) => attempt + 1);
-  }, []);
+  }, [cancelSessionOperation]);
+
+  useEffect(() => cancelSessionOperation, [cancelSessionOperation]);
 
   useEffect(() => {
-    let active = true;
+    const operation = beginSessionOperation();
     const statusController = new AbortController();
-    const sessionController = new AbortController();
+    const sessionController = operation.controller;
+    const abortStatus = () => statusController.abort();
+    sessionController.signal.addEventListener("abort", abortStatus, {
+      once: true,
+    });
 
     setApiState("checking");
     setApplicationState({ kind: "loading" });
 
     const statusTimeoutId = window.setTimeout(() => {
       statusController.abort();
-      if (active) {
+      if (isCurrentSessionOperation(operation)) {
         setApiState("unavailable");
       }
     }, API_TIMEOUT_MS);
     const sessionTimeoutId = window.setTimeout(() => {
       sessionController.abort();
-      if (active) {
+      if (isCurrentSessionOperation(operation)) {
         setApplicationState({ kind: "unavailable" });
       }
     }, API_TIMEOUT_MS);
 
     void getApiStatus(statusController.signal)
       .then(() => {
-        if (active && !statusController.signal.aborted) {
+        if (
+          isCurrentSessionOperation(operation) &&
+          !statusController.signal.aborted
+        ) {
           setApiState("available");
         }
       })
       .catch(() => {
-        if (active && !statusController.signal.aborted) {
+        if (
+          isCurrentSessionOperation(operation) &&
+          !statusController.signal.aborted
+        ) {
           setApiState("unavailable");
         }
       })
       .finally(() => window.clearTimeout(statusTimeoutId));
 
-    void getCsrfToken(sessionController.signal)
-      .then(async (csrfToken) => {
-        const identity = await getCurrentSession(sessionController.signal);
-
-        if (active && !sessionController.signal.aborted) {
+    void discoverSession(sessionController.signal)
+      .then(({ csrfToken, identity }) => {
+        if (
+          isCurrentSessionOperation(operation) &&
+          !sessionController.signal.aborted
+        ) {
           setApplicationState(
             identity === null
               ? { kind: "anonymous", csrfToken }
@@ -997,30 +1048,46 @@ function App() {
         }
       })
       .catch(() => {
-        if (active && !sessionController.signal.aborted) {
+        if (
+          isCurrentSessionOperation(operation) &&
+          !sessionController.signal.aborted
+        ) {
           setApplicationState({ kind: "unavailable" });
         }
       })
       .finally(() => window.clearTimeout(sessionTimeoutId));
 
     return () => {
-      active = false;
       window.clearTimeout(statusTimeoutId);
       window.clearTimeout(sessionTimeoutId);
+      sessionController.signal.removeEventListener("abort", abortStatus);
       statusController.abort();
       sessionController.abort();
+      if (isCurrentSessionOperation(operation)) {
+        cancelSessionOperation();
+      }
     };
-  }, [bootstrapAttempt]);
+  }, [
+    bootstrapAttempt,
+    beginSessionOperation,
+    cancelSessionOperation,
+    isCurrentSessionOperation,
+  ]);
 
   async function handleLogin(
     request: LoginRequest,
     csrfToken: CsrfToken,
   ): Promise<LoginOutcome> {
+    const operation = beginSessionOperation();
     try {
       const authenticatedSession = await withApiTimeout(
+        operation.controller,
         (signal) => createSessionWithRecovery(request, csrfToken, signal),
         LOGIN_TIMEOUT_MS,
       );
+      if (!isCurrentSessionOperation(operation)) {
+        return "superseded";
+      }
       setApplicationState({
         kind: "authenticated",
         csrfToken: authenticatedSession.csrfToken,
@@ -1029,6 +1096,9 @@ function App() {
       setApiState("available");
       return "authenticated";
     } catch (error: unknown) {
+      if (!isCurrentSessionOperation(operation)) {
+        return "superseded";
+      }
       if (error instanceof AuthenticationFailedError) {
         return "invalid-credentials";
       }
@@ -1046,14 +1116,22 @@ function App() {
   }
 
   async function handleLogout(csrfToken: CsrfToken): Promise<LogoutOutcome> {
+    const operation = beginSessionOperation();
     try {
-      const refreshedCsrfToken = await withApiTimeout((signal) =>
-        destroySessionWithRecovery(csrfToken, signal),
+      const refreshedCsrfToken = await withApiTimeout(
+        operation.controller,
+        (signal) => destroySessionWithRecovery(csrfToken, signal),
       );
+      if (!isCurrentSessionOperation(operation)) {
+        return "superseded";
+      }
       setApplicationState({ kind: "anonymous", csrfToken: refreshedCsrfToken });
       setApiState("available");
       return "logged-out";
     } catch {
+      if (!isCurrentSessionOperation(operation)) {
+        return "superseded";
+      }
       setApplicationState({ kind: "unavailable" });
       setApiState("unavailable");
       return "unavailable";
@@ -1066,10 +1144,7 @@ function App() {
     content = <LoadingPanel apiState={apiState} />;
   } else if (applicationState.kind === "unavailable") {
     content = (
-      <UnavailablePanel
-        apiState={apiState}
-        onRetry={() => setBootstrapAttempt((attempt) => attempt + 1)}
-      />
+      <UnavailablePanel apiState={apiState} onRetry={handleSessionExpired} />
     );
   } else if (applicationState.kind === "anonymous") {
     content = (
