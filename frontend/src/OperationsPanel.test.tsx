@@ -5,6 +5,7 @@ import {
   screen,
   waitFor,
 } from "@testing-library/react";
+import { Profiler } from "react";
 import { describe, expect, it, vi } from "vitest";
 
 import { OperationsPanel } from "./OperationsPanel";
@@ -80,6 +81,27 @@ async function openEventDetail() {
     }),
   );
   return screen.findByRole("heading", { name: "Processing event" });
+}
+
+function renderWithFeedbackFocus(feedbackText: string | RegExp) {
+  let firstCommitFocus: Element | null | undefined;
+  render(
+    <Profiler
+      id="operations-feedback"
+      onRender={() => {
+        // Observe committed feedback before passive focus effects can run.
+        if (
+          firstCommitFocus === undefined &&
+          screen.queryByText(feedbackText) !== null
+        ) {
+          firstCommitFocus = document.activeElement;
+        }
+      }}
+    >
+      <OperationsPanel csrfToken={csrfToken} onSessionExpired={vi.fn()} />
+    </Profiler>,
+  );
+  return () => firstCommitFocus;
 }
 
 describe("OperationsPanel", () => {
@@ -197,8 +219,8 @@ describe("OperationsPanel", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    render(
-      <OperationsPanel csrfToken={csrfToken} onSessionExpired={vi.fn()} />,
+    const getFocusAtFirstFeedbackCommit = renderWithFeedbackFocus(
+      "Retry accepted. Processing will resume asynchronously with a fresh attempt cycle.",
     );
 
     const row = await screen.findByRole("button", {
@@ -206,9 +228,11 @@ describe("OperationsPanel", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "Refresh operations" }));
     fireEvent.click(row);
-    fireEvent.click(
-      await screen.findByRole("button", { name: "Retry processing event" }),
-    );
+    const retryButton = await screen.findByRole("button", {
+      name: "Retry processing event",
+    });
+    retryButton.focus();
+    fireEvent.click(retryButton);
 
     expect(
       screen.getByRole("button", { name: "Requesting retry…" }),
@@ -230,6 +254,7 @@ describe("OperationsPanel", () => {
     const success = await screen.findByText(
       "Retry accepted. Processing will resume asynchronously with a fresh attempt cycle.",
     );
+    expect(getFocusAtFirstFeedbackCommit()).toBe(success);
     expect(success).toHaveFocus();
     expect(screen.getByText("No longer dead")).toBeVisible();
     expect(
@@ -422,6 +447,7 @@ describe("OperationsPanel", () => {
   it.each(["conflict", "uncertain"] as const)(
     "keeps an event displaced by newer failures unconfirmed after a %s result",
     async (result) => {
+      const recovery = deferred<Response>();
       let queueReads = 0;
       let retryCalls = 0;
       vi.stubGlobal(
@@ -429,9 +455,9 @@ describe("OperationsPanel", () => {
         vi.fn<typeof fetch>((input) => {
           if (String(input) === "/api/v1/processing-events/dead?limit=50") {
             queueReads += 1;
-            return Promise.resolve(
-              deadQueue(queueReads === 1 ? [deadEvent] : newerDeadEvents),
-            );
+            return queueReads === 1
+              ? Promise.resolve(deadQueue())
+              : recovery.promise;
           }
           retryCalls += 1;
           return result === "conflict"
@@ -442,17 +468,27 @@ describe("OperationsPanel", () => {
         }),
       );
 
-      render(
-        <OperationsPanel csrfToken={csrfToken} onSessionExpired={vi.fn()} />,
+      const getFocusAtFirstFeedbackCommit = renderWithFeedbackFocus(
+        /the latest results do not include this event, so its current state is unknown/i,
       );
       await openEventDetail();
-      fireEvent.click(
-        screen.getByRole("button", { name: "Retry processing event" }),
-      );
+      const retryButton = screen.getByRole("button", {
+        name: "Retry processing event",
+      });
+      retryButton.focus();
+      fireEvent.click(retryButton);
+
+      expect(
+        await screen.findByRole("button", {
+          name: "Recovering latest state…",
+        }),
+      ).toBeDisabled();
+      await act(async () => recovery.resolve(deadQueue(newerDeadEvents)));
 
       const feedback = await screen.findByText(
         /the latest results do not include this event, so its current state is unknown/i,
       );
+      expect(getFocusAtFirstFeedbackCommit()).toBe(feedback);
       expect(feedback).toHaveFocus();
       expect(screen.getByText("Status unconfirmed")).toBeVisible();
       expect(screen.getByText(eventId)).toBeVisible();
@@ -662,8 +698,8 @@ describe("OperationsPanel", () => {
       }),
     );
 
-    render(
-      <OperationsPanel csrfToken={csrfToken} onSessionExpired={vi.fn()} />,
+    const getFocusAtFirstFeedbackCommit = renderWithFeedbackFocus(
+      /the latest results do not include this event, so its current state is unknown/i,
     );
     const row = await screen.findByRole("button", {
       name: `View dead processing event ${eventId}`,
@@ -671,15 +707,20 @@ describe("OperationsPanel", () => {
     fireEvent.click(screen.getByRole("button", { name: "Refresh operations" }));
     fireEvent.click(row);
     await screen.findByRole("heading", { name: "Processing event" });
+    const retryButton = screen.getByRole("button", {
+      name: "Retry processing event",
+    });
+    retryButton.focus();
 
     await act(async () => refresh.resolve(deadQueue(newerDeadEvents)));
 
     expect(screen.getByText("Status unconfirmed")).toBeVisible();
-    expect(
-      screen.getByText(
-        /the latest results do not include this event, so its current state is unknown/i,
-      ),
-    ).toBeVisible();
+    const feedback = screen.getByText(
+      /the latest results do not include this event, so its current state is unknown/i,
+    );
+    expect(feedback).toBeVisible();
+    expect(getFocusAtFirstFeedbackCommit()).toBe(feedback);
+    expect(feedback).toHaveFocus();
     expect(screen.queryByText("No longer dead")).toBeNull();
     expect(
       screen.queryByText(/retry result could not be confirmed/i),
