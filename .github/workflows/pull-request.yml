@@ -133,6 +133,7 @@ jobs:
 
   containers:
     name: Containers
+    needs: backend
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -178,6 +179,8 @@ jobs:
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         env:
           TRIVY_INCLUDE_DEV_DEPS: "true"
+          TRIVY_VEX: infra/security/spring-mvc-source.vex.json
+          TRIVY_SHOW_SUPPRESSED: "true"
         with:
           scan-type: fs
           scan-ref: .
@@ -187,6 +190,11 @@ jobs:
           exit-code: "1"
           format: table
           hide-progress: true
+
+      - name: Verify vulnerability disposition boundaries
+        env:
+          TRIVY_CACHE_DIR: .cache/trivy
+        run: node --test infra/security/vulnerability-policy.test.mjs
 
       - name: Verify database certificate trust and rejection
         run: bash infra/smoke/database-tls.sh
@@ -210,9 +218,29 @@ jobs:
           scanners: vuln
           vuln-type: os,library
           severity: CRITICAL
-          exit-code: "1"
-          format: table
+          exit-code: "0"
+          format: json
+          output: ${{ runner.temp }}/hosting-image-vulnerabilities.json
           hide-progress: true
+
+      - name: Enforce hosting image critical vulnerability gate
+        run: >-
+          trivy convert
+          --ignore-policy infra/security/hosting-image.rego
+          --show-suppressed
+          --format table
+          --severity CRITICAL
+          --exit-code 1
+          ${{ runner.temp }}/hosting-image-vulnerabilities.json
+
+      - name: Retain hosting image vulnerability findings
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: hosting-image-vulnerability-findings
+          path: ${{ runner.temp }}/hosting-image-vulnerabilities.json
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Verify non-root runtime users
         shell: bash
