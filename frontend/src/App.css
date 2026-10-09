@@ -1426,6 +1426,7 @@ code {
 }
 
 .work-order-detail:focus,
+.work-order-create__feedback:focus,
 .work-order-action-feedback:focus {
   outline: 3px solid #d3a74a;
   outline-offset: 3px;
