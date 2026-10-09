@@ -154,6 +154,7 @@ function AlertDetailPanel({
   const recoveryPending = useRef(false);
   const detailFocus = useRef<HTMLElement | null>(null);
   const feedbackFocus = useRef<HTMLParagraphElement | null>(null);
+  const createFeedbackFocus = useRef<HTMLParagraphElement | null>(null);
   const focusFeedbackAfterUpdate = useRef(false);
   const observedRefreshVersion = useRef(refreshVersion);
   const mounted = useRef(true);
@@ -544,6 +545,14 @@ function AlertDetailPanel({
     [alertId, onSessionExpired],
   );
 
+  function handleCreateRecoveryRetry() {
+    if (createActionState !== "recovery-failed") {
+      return;
+    }
+    createFeedbackFocus.current?.focus();
+    void recoverWorkOrderCreation(createRecoveryReason.current);
+  }
+
   async function handleCreateWorkOrder() {
     if (createActionState !== "idle") {
       return;
@@ -875,8 +884,10 @@ function AlertDetailPanel({
 
               {createFeedback !== null && (
                 <p
+                  ref={createFeedbackFocus}
                   className={`form-message work-order-create__feedback work-order-create__feedback--${createFeedback.kind}`}
                   role={createFeedback.kind === "success" ? "status" : "alert"}
+                  tabIndex={-1}
                 >
                   {createFeedback.message}
                 </p>
@@ -907,11 +918,7 @@ function AlertDetailPanel({
                   <button
                     className="secondary-button secondary-button--compact"
                     type="button"
-                    onClick={() =>
-                      void recoverWorkOrderCreation(
-                        createRecoveryReason.current,
-                      )
-                    }
+                    onClick={handleCreateRecoveryRetry}
                   >
                     Retry authoritative check
                   </button>

@@ -1,4 +1,10 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import { AlertPanel } from "./AlertPanel";
@@ -81,6 +87,16 @@ function problemResponse(code: string, status: number) {
   });
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 class QuietEventSource {
   close() {}
   addEventListener() {}
@@ -111,12 +127,13 @@ function installFetch(
 
 async function openAlert(
   roleCode: "OPERATIONS_ADMIN" | "TECHNICIAN" | "VIEWER",
+  onSessionExpired = () => {},
 ) {
-  render(
+  const view = render(
     <AlertPanel
       roleCode={roleCode}
       csrfToken={csrfToken}
-      onSessionExpired={() => {}}
+      onSessionExpired={onSessionExpired}
       createEventSource={createEventSource}
     />,
   );
@@ -126,6 +143,7 @@ async function openAlert(
     }),
   );
   await screen.findByRole("heading", { name: "High bearing temperature" });
+  return view;
 }
 
 describe("alert-to-work-order action", () => {
@@ -219,6 +237,230 @@ describe("alert-to-work-order action", () => {
       expect.objectContaining({ method: "GET" }),
     );
   });
+
+  it.each(["confirmed", "empty", "failed", "forbidden"] as const)(
+    "WO-05: preserves keyboard retry focus through a %s creation recovery",
+    async (outcome) => {
+      const recovery = deferred<Response>();
+      let queueReads = 0;
+      const fetchMock = installFetch(async (url) => {
+        if (url === "/api/v1/work-orders") {
+          throw new TypeError("response lost");
+        }
+        if (url === "/api/v1/work-orders?limit=50") {
+          queueReads += 1;
+          if (queueReads === 1) {
+            throw new TypeError("queue unavailable");
+          }
+          return recovery.promise;
+        }
+        throw new Error(`Unexpected URL ${url}`);
+      });
+      await openAlert("OPERATIONS_ADMIN");
+      fireEvent.click(
+        screen.getByRole("button", { name: "Create work order" }),
+      );
+      const retryButton = await screen.findByRole("button", {
+        name: "Retry authoritative check",
+      });
+
+      retryButton.focus();
+      fireEvent.click(retryButton);
+      const feedback = screen.getByText(
+        /Checking the saved work-order queue before another action/i,
+      );
+      expect(retryButton).not.toBeInTheDocument();
+      expect(feedback).toHaveFocus();
+      expect(
+        screen.getByRole("button", { name: "Checking saved work orders…" }),
+      ).toBeDisabled();
+      await act(async () => {
+        if (outcome === "failed") {
+          recovery.reject(new TypeError("queue still unavailable"));
+        } else {
+          recovery.resolve(
+            outcome === "forbidden"
+              ? problemResponse("ACCESS_DENIED", 403)
+              : jsonResponse({
+                  workOrders: outcome === "confirmed" ? [workOrder] : [],
+                  limit: 50,
+                }),
+          );
+        }
+      });
+
+      const finalFeedback = screen.getByText(
+        outcome === "confirmed"
+          ? /saved work-order queue confirms/i
+          : outcome === "empty"
+            ? /no matching work order was visible in the bounded queue/i
+            : outcome === "forbidden"
+              ? /did not grant access to recover/i
+              : /saved work-order queue could not be confirmed/i,
+      );
+      expect(finalFeedback).toHaveFocus();
+      expect(
+        screen.getByRole("button", {
+          name:
+            outcome === "confirmed"
+              ? "Work order created"
+              : outcome === "forbidden"
+                ? "Create unavailable"
+                : "Authoritative check required",
+        }),
+      ).toBeDisabled();
+      const finalRetry = screen.queryByRole("button", {
+        name: "Retry authoritative check",
+      });
+      if (outcome === "empty" || outcome === "failed") {
+        expect(finalRetry).toBeVisible();
+      } else {
+        expect(finalRetry).not.toBeInTheDocument();
+      }
+      expect(queueReads).toBe(2);
+      expect(
+        fetchMock.mock.calls.filter(([, init]) => init?.method === "POST"),
+      ).toHaveLength(1);
+    },
+  );
+
+  it("WO-05: preserves deliberately moved focus when creation recovery completes", async () => {
+    const recovery = deferred<Response>();
+    let queueReads = 0;
+    const fetchMock = installFetch(async (url) => {
+      if (url === "/api/v1/work-orders") {
+        throw new TypeError("response lost");
+      }
+      if (url === "/api/v1/work-orders?limit=50") {
+        queueReads += 1;
+        if (queueReads === 1) {
+          throw new TypeError("queue unavailable");
+        }
+        return recovery.promise;
+      }
+      throw new Error(`Unexpected URL ${url}`);
+    });
+    await openAlert("OPERATIONS_ADMIN");
+    fireEvent.click(screen.getByRole("button", { name: "Create work order" }));
+    const retryButton = await screen.findByRole("button", {
+      name: "Retry authoritative check",
+    });
+    retryButton.focus();
+    fireEvent.click(retryButton);
+    const backButton = screen.getByRole("button", { name: "Back to alerts" });
+    backButton.focus();
+
+    await act(async () =>
+      recovery.resolve(jsonResponse({ workOrders: [workOrder], limit: 50 })),
+    );
+
+    expect(screen.getByText(/saved work-order queue confirms/i)).toBeVisible();
+    expect(backButton).toHaveFocus();
+    expect(
+      fetchMock.mock.calls.filter(([, init]) => init?.method === "POST"),
+    ).toHaveLength(1);
+  });
+
+  it.each(["create", "recovery"] as const)(
+    "WO-05: bounds the %s timeout without replaying creation",
+    async (operation) => {
+      let timedSignal: AbortSignal | null | undefined;
+      const fetchMock = installFetch(async (url, init) => {
+        if (
+          (operation === "create" && url === "/api/v1/work-orders") ||
+          (operation === "recovery" && url === "/api/v1/work-orders?limit=50")
+        ) {
+          timedSignal = init?.signal;
+          return new Promise<Response>((_resolve, reject) => {
+            timedSignal?.addEventListener(
+              "abort",
+              () => reject(new DOMException("Aborted", "AbortError")),
+              { once: true },
+            );
+          });
+        }
+        if (url === "/api/v1/work-orders") {
+          throw new TypeError("response lost");
+        }
+        if (url === "/api/v1/work-orders?limit=50") {
+          return jsonResponse({ workOrders: [workOrder], limit: 50 });
+        }
+        throw new Error(`Unexpected URL ${url}`);
+      });
+      await openAlert("OPERATIONS_ADMIN");
+      vi.useFakeTimers();
+      try {
+        fireEvent.click(
+          screen.getByRole("button", { name: "Create work order" }),
+        );
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(4_999);
+        });
+        expect(timedSignal?.aborted).toBe(false);
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(1);
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+
+      expect(timedSignal?.aborted).toBe(true);
+      expect(
+        await screen.findByRole("button", {
+          name:
+            operation === "create"
+              ? "Work order created"
+              : "Authoritative check required",
+        }),
+      ).toBeDisabled();
+      expect(
+        fetchMock.mock.calls.filter(([, init]) => init?.method === "POST"),
+      ).toHaveLength(1);
+      expect(
+        fetchMock.mock.calls.filter(
+          ([input]) => String(input) === "/api/v1/work-orders?limit=50",
+        ),
+      ).toHaveLength(1);
+    },
+  );
+
+  it.each(["create", "recovery"] as const)(
+    "WO-05: aborts %s on unmount and ignores its late authentication denial",
+    async (operation) => {
+      const pending = deferred<Response>();
+      const onSessionExpired = vi.fn();
+      let pendingSignal: AbortSignal | null | undefined;
+      const fetchMock = installFetch(async (url, init) => {
+        if (
+          (operation === "create" && url === "/api/v1/work-orders") ||
+          (operation === "recovery" && url === "/api/v1/work-orders?limit=50")
+        ) {
+          pendingSignal = init?.signal;
+          return pending.promise;
+        }
+        if (url === "/api/v1/work-orders") {
+          throw new TypeError("response lost");
+        }
+        throw new Error(`Unexpected URL ${url}`);
+      });
+      const { unmount } = await openAlert("OPERATIONS_ADMIN", onSessionExpired);
+      fireEvent.click(
+        screen.getByRole("button", { name: "Create work order" }),
+      );
+      await waitFor(() => expect(pendingSignal).toBeInstanceOf(AbortSignal));
+
+      unmount();
+      expect(pendingSignal?.aborted).toBe(true);
+      const callsAtUnmount = fetchMock.mock.calls.length;
+      await act(async () => pending.resolve(jsonResponse({}, 401)));
+
+      expect(onSessionExpired).not.toHaveBeenCalled();
+      expect(fetchMock).toHaveBeenCalledTimes(callsAtUnmount);
+      expect(
+        fetchMock.mock.calls.filter(([, init]) => init?.method === "POST"),
+      ).toHaveLength(1);
+    },
+  );
 
   it("expires the app session when create authentication is rejected", async () => {
     const onSessionExpired = vi.fn();
