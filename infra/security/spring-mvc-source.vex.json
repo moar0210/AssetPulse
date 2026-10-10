@@ -2,8 +2,8 @@
   "@context": "https://openvex.dev/ns/v0.2.0",
   "@id": "https://github.com/moar0210/AssetPulse/blob/main/infra/security/spring-mvc-source.vex.json",
   "author": "AssetPulse maintainers",
-  "timestamp": "2026-10-07T17:37:22Z",
-  "version": 1,
+  "timestamp": "2026-10-10T15:26:03Z",
+  "version": 2,
   "statements": [
     {
       "vulnerability": {
@@ -22,6 +22,24 @@
       "status": "not_affected",
       "justification": "vulnerable_code_not_in_execute_path",
       "impact_statement": "The official Spring advisory requires XsltView and an implicit view name reached through a /** view-rendering mapping. AssetPulse's tested MVC configuration uses response-body API handlers, has no XsltView or XSLT view resolver, and does not render XSLT for unmapped requests. This statement applies only to this AssetPulse application and exact Spring MVC dependency version; reassess when its MVC configuration or dependency version changes. https://spring.io/security/cve-2026-47884/"
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-47890"
+      },
+      "products": [
+        {
+          "@id": "pkg:maven/io.github.moar0210/assetpulse-backend@0.0.1-SNAPSHOT",
+          "subcomponents": [
+            {
+              "@id": "pkg:maven/org.springframework/spring-webmvc@6.2.19"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "The official Spring advisory requires view fragments streamed over SSE. AssetPulse's tested MVC configuration sends only explicit application/json data through SseEmitter: an empty readiness object or an AlertChangeEvent containing a UUID and fixed enum. Its SSE handler and configured JSON converter do not render view fragments. This statement applies only to this AssetPulse application and exact Spring MVC dependency version; reassess when the SSE handler, emitted payloads, converters or dependency version changes. https://spring.io/security/cve-2026-47890/"
     }
   ]
 }

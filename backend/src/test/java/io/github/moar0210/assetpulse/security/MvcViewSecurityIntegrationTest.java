@@ -8,12 +8,14 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import io.github.moar0210.assetpulse.alerts.AlertChangeEvent;
 import jakarta.servlet.DispatcherType;
 import jakarta.servlet.RequestDispatcher;
 import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -21,8 +23,13 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.core.MethodParameter;
+import org.springframework.core.ResolvableType;
 import org.springframework.core.annotation.AnnotatedElementUtils;
 import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import org.springframework.http.converter.HttpMessageConverter;
+import org.springframework.http.converter.json.MappingJackson2HttpMessageConverter;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.util.ReflectionTestUtils;
@@ -31,6 +38,7 @@ import org.springframework.test.web.servlet.MvcResult;
 import org.springframework.web.bind.annotation.ResponseBody;
 import org.springframework.web.context.WebApplicationContext;
 import org.springframework.web.method.support.HandlerMethodReturnValueHandler;
+import org.springframework.web.servlet.ModelAndView;
 import org.springframework.web.servlet.View;
 import org.springframework.web.servlet.ViewResolver;
 import org.springframework.web.servlet.handler.AbstractUrlHandlerMapping;
@@ -40,9 +48,11 @@ import org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandl
 import org.springframework.web.servlet.mvc.method.annotation.RequestResponseBodyMethodProcessor;
 import org.springframework.web.servlet.mvc.method.annotation.ResponseBodyEmitterReturnValueHandler;
 import org.springframework.web.servlet.mvc.method.annotation.ResponseEntityReturnValueHandler;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 import org.springframework.web.servlet.resource.ResourceHttpRequestHandler;
 import org.springframework.web.servlet.view.BeanNameViewResolver;
 import org.springframework.web.servlet.view.ContentNegotiatingViewResolver;
+import org.springframework.web.servlet.view.FragmentsRendering;
 import org.springframework.web.servlet.view.InternalResourceView;
 import org.springframework.web.servlet.view.InternalResourceViewResolver;
 import org.springframework.web.servlet.view.JstlView;
@@ -137,6 +147,74 @@ class MvcViewSecurityIntegrationTest {
                             HttpEntityMethodProcessor.class,
                             ResponseEntityReturnValueHandler.class,
                             ResponseBodyEmitterReturnValueHandler.class);
+        }
+    }
+
+    @Test
+    @DisplayName(
+            "AUTH-04, ALR-03: the configured SSE endpoint writes typed JSON without view fragments")
+    void configuredSseEndpointUsesTheJsonEmitterHandlerAndConverter() {
+        var streams =
+                requestMappings.getHandlerMethods().entrySet().stream()
+                        .filter(
+                                entry ->
+                                        entry
+                                                        .getKey()
+                                                        .getProducesCondition()
+                                                        .getProducibleMediaTypes()
+                                                        .stream()
+                                                        .anyMatch(
+                                                                MediaType.TEXT_EVENT_STREAM
+                                                                        ::isCompatibleWith)
+                                                || (entry.getValue()
+                                                                .getBeanType()
+                                                                .getPackageName()
+                                                                .startsWith(
+                                                                        "io.github.moar0210.assetpulse")
+                                                        && selectedReturnHandler(
+                                                                                entry.getValue()
+                                                                                        .getReturnType())
+                                                                        .getClass()
+                                                                == ResponseBodyEmitterReturnValueHandler
+                                                                        .class))
+                        .toList();
+        assertThat(streams).hasSize(1);
+        var stream = streams.getFirst();
+        assertThat(stream.getKey().getPatternValues()).containsExactly("/api/v1/alerts/stream");
+        MethodParameter returnType = stream.getValue().getReturnType();
+        assertJsonSseReturnType(returnType);
+
+        var selectedHandler = selectedReturnHandler(returnType);
+        assertThat(selectedHandler.getClass())
+                .isEqualTo(ResponseBodyEmitterReturnValueHandler.class);
+        Object configured = ReflectionTestUtils.getField(selectedHandler, "sseMessageConverters");
+        assertThat(configured).isInstanceOf(List.class);
+        List<?> converters = (List<?>) configured;
+        assertThat(converters).allMatch(HttpMessageConverter.class::isInstance);
+        for (Class<?> payloadType : List.of(Map.class, AlertChangeEvent.class)) {
+            var selectedConverter =
+                    converters.stream()
+                            .map(converter -> (HttpMessageConverter<?>) converter)
+                            .filter(
+                                    converter ->
+                                            converter.canWrite(
+                                                    payloadType, MediaType.APPLICATION_JSON))
+                            .findFirst()
+                            .orElseThrow();
+            assertThat(selectedConverter.getClass())
+                    .as("first SSE JSON converter for %s", payloadType.getName())
+                    .isEqualTo(MappingJackson2HttpMessageConverter.class);
+        }
+    }
+
+    @Test
+    void sseReturnTypeGuardRejectsViewAndFragmentSignatures() throws Exception {
+        for (String method : List.of("fragments", "modelAndView", "view", "untyped")) {
+            MethodParameter returnType =
+                    new MethodParameter(UnsafeSseSignatures.class.getDeclaredMethod(method), -1);
+            assertThatThrownBy(() -> assertJsonSseReturnType(returnType))
+                    .as("SSE return type for %s", method)
+                    .isInstanceOf(AssertionError.class);
         }
     }
 
@@ -265,6 +343,37 @@ class MvcViewSecurityIntegrationTest {
 
     private Object resolveHandler(Object handler) {
         return handler instanceof String beanName ? applicationContext.getBean(beanName) : handler;
+    }
+
+    private static void assertJsonSseReturnType(MethodParameter returnType) {
+        ResolvableType resolved = ResolvableType.forMethodParameter(returnType);
+        assertThat(resolved.resolve()).isEqualTo(ResponseEntity.class);
+        assertThat(resolved.getGeneric(0).resolve()).isEqualTo(SseEmitter.class);
+    }
+
+    private HandlerMethodReturnValueHandler selectedReturnHandler(MethodParameter returnType) {
+        return requestAdapter.getReturnValueHandlers().stream()
+                .filter(candidate -> candidate.supportsReturnType(returnType))
+                .findFirst()
+                .orElseThrow();
+    }
+
+    private static class UnsafeSseSignatures {
+        ResponseEntity<FragmentsRendering> fragments() {
+            return null;
+        }
+
+        ResponseEntity<ModelAndView> modelAndView() {
+            return null;
+        }
+
+        ResponseEntity<View> view() {
+            return null;
+        }
+
+        ResponseEntity<Object> untyped() {
+            return null;
+        }
     }
 
     private void assertRejected(ViewResolver resolver) {
