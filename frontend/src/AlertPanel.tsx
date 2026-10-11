@@ -153,6 +153,7 @@ function AlertDetailPanel({
   const detailTrailingRefresh = useRef(false);
   const recoveryPending = useRef(false);
   const detailFocus = useRef<HTMLElement | null>(null);
+  const detailRetryFocus = useRef<HTMLButtonElement | null>(null);
   const feedbackFocus = useRef<HTMLParagraphElement | null>(null);
   const createFeedbackFocus = useRef<HTMLParagraphElement | null>(null);
   const focusFeedbackAfterUpdate = useRef(false);
@@ -198,6 +199,15 @@ function AlertDetailPanel({
     (feedbackFocus.current ?? detailFocus.current)?.focus();
   }, []);
 
+  const focusBeforeRemovingDetailRetry = useCallback(() => {
+    if (
+      detailRetryFocus.current !== null &&
+      detailRetryFocus.current === document.activeElement
+    ) {
+      detailFocus.current?.focus();
+    }
+  }, []);
+
   const refreshDetail = useCallback(
     function requestDetailRefresh(showLoading: boolean) {
       if (!mounted.current) {
@@ -220,6 +230,7 @@ function AlertDetailPanel({
       );
 
       if (showLoading) {
+        focusBeforeRemovingDetailRetry();
         setDetailState((current) =>
           current.kind === "ready" ? current : { kind: "loading" },
         );
@@ -242,6 +253,7 @@ function AlertDetailPanel({
             if (focusedActionWillBeRemoved) {
               focusStableDetailTarget();
             }
+            focusBeforeRemovingDetailRetry();
             setDetailState({ kind: "ready", detail, refreshFailed: false });
             finishRecovery(true);
           }
@@ -259,6 +271,7 @@ function AlertDetailPanel({
             return;
           }
           if (error instanceof AlertNotFoundError) {
+            focusBeforeRemovingDetailRetry();
             setDetailState({ kind: "not-found" });
             if (!detailTrailingRefresh.current) {
               finishRecovery(false);
@@ -266,6 +279,7 @@ function AlertDetailPanel({
             return;
           }
           if (error instanceof AlertForbiddenError) {
+            focusBeforeRemovingDetailRetry();
             setDetailState({ kind: "forbidden" });
             if (!detailTrailingRefresh.current) {
               finishRecovery(false);
@@ -296,7 +310,13 @@ function AlertDetailPanel({
           }
         });
     },
-    [alertId, finishRecovery, focusStableDetailTarget, onSessionExpired],
+    [
+      alertId,
+      finishRecovery,
+      focusBeforeRemovingDetailRetry,
+      focusStableDetailTarget,
+      onSessionExpired,
+    ],
   );
 
   useEffect(() => {
@@ -683,6 +703,7 @@ function AlertDetailPanel({
           <button
             className="secondary-button secondary-button--compact"
             type="button"
+            ref={detailRetryFocus}
             onClick={() => refreshDetail(true)}
           >
             Retry alert details

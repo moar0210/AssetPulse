@@ -1326,4 +1326,298 @@ describe("live alert experience", () => {
       await screen.findByRole("heading", { name: "Alerts" }),
     ).toBeVisible();
   });
+
+  describe("ALR-03: unavailable alert detail lifecycle", () => {
+    const initialFailures = ["503", "malformed"] as const;
+
+    function initialFailure(reason: (typeof initialFailures)[number]) {
+      return reason === "503"
+        ? jsonResponse({}, 503)
+        : jsonResponse({ id: alertId });
+    }
+
+    it.each(initialFailures)(
+      "keeps stable detail focus when a manual retry after %s removes its button",
+      async (reason) => {
+        const { factory } = streamHarness();
+        const retryResponse = deferred<Response>();
+        let detailReads = 0;
+        let queueReads = 0;
+        const fetchMock = installFetch(async (url) => {
+          if (url === `/api/v1/alerts/${alertId}`) {
+            detailReads += 1;
+            return detailReads === 1
+              ? initialFailure(reason)
+              : retryResponse.promise;
+          }
+          queueReads += 1;
+          return queueResponse();
+        });
+        render(
+          <AlertPanel
+            roleCode="VIEWER"
+            csrfToken={csrfToken}
+            onSessionExpired={() => {}}
+            createEventSource={factory}
+          />,
+        );
+        fireEvent.click(
+          await screen.findByRole("button", {
+            name: /view open alert for boiler feed pump/i,
+          }),
+        );
+        const retry = await screen.findByRole("button", {
+          name: "Retry alert details",
+        });
+        const detail = screen.getByRole("region", {
+          name: "Alert details unavailable",
+        });
+        retry.focus();
+        fireEvent.click(retry);
+
+        expect(screen.getByText("Loading alert details…")).toBeVisible();
+        expect(
+          screen.queryByRole("button", { name: "Retry alert details" }),
+        ).toBeNull();
+        expect(detail).toHaveFocus();
+        expect(detailReads).toBe(2);
+
+        await act(async () => retryResponse.resolve(jsonResponse(openDetail)));
+        expect(
+          await screen.findByRole("heading", {
+            name: "High bearing temperature",
+          }),
+        ).toBeVisible();
+        expect(detail).toHaveFocus();
+        expect(detailReads).toBe(2);
+        expect(queueReads).toBe(1);
+        expect(
+          fetchMock.mock.calls.every(([, init]) => init?.method === "GET"),
+        ).toBe(true);
+      },
+    );
+
+    it.each(
+      initialFailures.flatMap((reason) =>
+        (["success", "403", "404", "503"] as const).map((outcome) => ({
+          reason,
+          outcome,
+        })),
+      ),
+    )(
+      "preserves an appropriate focus target when a stream refresh after $reason finishes with $outcome",
+      async ({ reason, outcome }) => {
+        const { source, factory } = streamHarness();
+        const refreshResponse = deferred<Response>();
+        let detailReads = 0;
+        let queueReads = 0;
+        const onSessionExpired = vi.fn();
+        const fetchMock = installFetch(async (url) => {
+          if (url === `/api/v1/alerts/${alertId}`) {
+            detailReads += 1;
+            return detailReads === 1
+              ? initialFailure(reason)
+              : refreshResponse.promise;
+          }
+          queueReads += 1;
+          return queueResponse();
+        });
+        render(
+          <AlertPanel
+            roleCode="VIEWER"
+            csrfToken={csrfToken}
+            onSessionExpired={onSessionExpired}
+            createEventSource={factory}
+          />,
+        );
+        fireEvent.click(
+          await screen.findByRole("button", {
+            name: /view open alert for boiler feed pump/i,
+          }),
+        );
+        const retry = await screen.findByRole("button", {
+          name: "Retry alert details",
+        });
+        const detail = screen.getByRole("region", {
+          name: "Alert details unavailable",
+        });
+        retry.focus();
+        await act(async () => source.emit("open"));
+        expect(detailReads).toBe(2);
+        expect(retry).toHaveFocus();
+        expect(retry).toBeVisible();
+
+        await act(async () =>
+          refreshResponse.resolve(
+            outcome === "success"
+              ? jsonResponse(openDetail)
+              : jsonResponse(
+                  { detail: "Riverside secret compressor" },
+                  Number(outcome),
+                ),
+          ),
+        );
+
+        if (outcome === "503") {
+          expect(
+            screen.getByRole("button", { name: "Retry alert details" }),
+          ).toBe(retry);
+          expect(retry).toHaveFocus();
+          expect(
+            screen.getByRole("heading", { name: "Alert details unavailable" }),
+          ).toBeVisible();
+        } else {
+          expect(
+            screen.queryByRole("button", { name: "Retry alert details" }),
+          ).toBeNull();
+          expect(detail).toHaveFocus();
+          expect(
+            screen.getByRole("heading", {
+              name:
+                outcome === "success"
+                  ? "High bearing temperature"
+                  : outcome === "403"
+                    ? "Alert access denied"
+                    : "Alert not found",
+            }),
+          ).toBeVisible();
+        }
+        expect(screen.queryByText(/Riverside|compressor/)).toBeNull();
+        expect(onSessionExpired).not.toHaveBeenCalled();
+        expect(detailReads).toBe(2);
+        expect(queueReads).toBe(2);
+        expect(
+          fetchMock.mock.calls.every(([, init]) => init?.method === "GET"),
+        ).toBe(true);
+      },
+    );
+
+    it.each(
+      initialFailures.flatMap((reason) =>
+        (["manual", "stream"] as const).map((refresh) => ({ reason, refresh })),
+      ),
+    )(
+      "preserves moved Back focus while a $refresh retry after $reason completes",
+      async ({ reason, refresh }) => {
+        const { source, factory } = streamHarness();
+        const refreshResponse = deferred<Response>();
+        let detailReads = 0;
+        let queueReads = 0;
+        const fetchMock = installFetch(async (url) => {
+          if (url === `/api/v1/alerts/${alertId}`) {
+            detailReads += 1;
+            return detailReads === 1
+              ? initialFailure(reason)
+              : refreshResponse.promise;
+          }
+          queueReads += 1;
+          return queueResponse();
+        });
+        render(
+          <AlertPanel
+            roleCode="VIEWER"
+            csrfToken={csrfToken}
+            onSessionExpired={() => {}}
+            createEventSource={factory}
+          />,
+        );
+        fireEvent.click(
+          await screen.findByRole("button", {
+            name: /view open alert for boiler feed pump/i,
+          }),
+        );
+        const retry = await screen.findByRole("button", {
+          name: "Retry alert details",
+        });
+        retry.focus();
+        if (refresh === "manual") {
+          fireEvent.click(retry);
+        } else {
+          await act(async () => source.emit("open"));
+        }
+        expect(detailReads).toBe(2);
+        const back = screen.getByRole("button", { name: "Back to alerts" });
+        back.focus();
+        expect(back).toHaveFocus();
+
+        await act(async () =>
+          refreshResponse.resolve(jsonResponse(openDetail)),
+        );
+        expect(
+          await screen.findByRole("heading", {
+            name: "High bearing temperature",
+          }),
+        ).toBeVisible();
+        expect(back).toHaveFocus();
+        expect(detailReads).toBe(2);
+        expect(queueReads).toBe(refresh === "manual" ? 1 : 2);
+        expect(
+          fetchMock.mock.calls.every(([, init]) => init?.method === "GET"),
+        ).toBe(true);
+      },
+    );
+
+    it.each(["Back", "unmount"] as const)(
+      "aborts detail on %s and ignores its late 401 without another request",
+      async (navigation) => {
+        const { source, factory } = streamHarness();
+        const detailResponse = deferred<Response>();
+        const onSessionExpired = vi.fn();
+        let detailSignal: AbortSignal | null | undefined;
+        let queueReads = 0;
+        let detailReads = 0;
+        const fetchMock = installFetch(async (url, init) => {
+          if (url === `/api/v1/alerts/${alertId}`) {
+            detailReads += 1;
+            detailSignal = init?.signal;
+            return detailResponse.promise;
+          }
+          queueReads += 1;
+          return queueResponse();
+        });
+        const { unmount } = render(
+          <AlertPanel
+            roleCode="VIEWER"
+            csrfToken={csrfToken}
+            onSessionExpired={onSessionExpired}
+            createEventSource={factory}
+          />,
+        );
+        fireEvent.click(
+          await screen.findByRole("button", {
+            name: /view open alert for boiler feed pump/i,
+          }),
+        );
+        expect(screen.getByText("Loading alert details…")).toBeVisible();
+        expect(detailSignal).toBeInstanceOf(AbortSignal);
+        expect(detailSignal?.aborted).toBe(false);
+
+        if (navigation === "Back") {
+          fireEvent.click(
+            screen.getByRole("button", { name: "Back to alerts" }),
+          );
+        } else {
+          unmount();
+        }
+        expect(detailSignal?.aborted).toBe(true);
+        await act(async () => detailResponse.resolve(jsonResponse({}, 401)));
+
+        expect(onSessionExpired).not.toHaveBeenCalled();
+        expect(detailReads).toBe(1);
+        expect(queueReads).toBe(1);
+        expect(fetchMock).toHaveBeenCalledTimes(2);
+        if (navigation === "Back") {
+          expect(
+            screen.getByRole("button", {
+              name: /view open alert for boiler feed pump/i,
+            }),
+          ).toHaveFocus();
+          expect(source.close).not.toHaveBeenCalled();
+        } else {
+          expect(source.close).toHaveBeenCalledOnce();
+          expect(screen.queryByRole("heading", { name: "Alerts" })).toBeNull();
+        }
+      },
+    );
+  });
 });
