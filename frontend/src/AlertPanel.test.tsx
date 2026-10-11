@@ -786,6 +786,236 @@ describe("live alert experience", () => {
     expect(detailReads).toBe(2);
   });
 
+  it.each(["conflict", "uncertain"] as const)(
+    "preserves deliberately moved Back focus when automatic %s recovery resolves the alert",
+    async (reason) => {
+      const { factory } = streamHarness();
+      const recovery = deferred<Response>();
+      let detailReads = 0;
+      let queueReads = 0;
+      let commandCalls = 0;
+      installFetch(async (url, init) => {
+        if (url === `/api/v1/alerts/${alertId}/acknowledge`) {
+          expect(init?.method).toBe("POST");
+          commandCalls += 1;
+          if (reason === "uncertain") {
+            throw new TypeError("response lost");
+          }
+          return jsonResponse({}, 409);
+        }
+        if (url === `/api/v1/alerts/${alertId}`) {
+          detailReads += 1;
+          return detailReads === 1
+            ? jsonResponse(openDetail)
+            : recovery.promise;
+        }
+        expect(url).toBe("/api/v1/alerts?limit=50");
+        queueReads += 1;
+        return queueResponse();
+      });
+
+      render(
+        <AlertPanel
+          roleCode="OPERATIONS_ADMIN"
+          csrfToken={csrfToken}
+          onSessionExpired={() => {}}
+          createEventSource={factory}
+        />,
+      );
+      fireEvent.click(
+        await screen.findByRole("button", {
+          name: /view open alert for boiler feed pump/i,
+        }),
+      );
+      const command = await screen.findByRole("button", {
+        name: "Acknowledge alert",
+      });
+      command.focus();
+      fireEvent.click(command);
+      await waitFor(() => expect(detailReads).toBe(2));
+      await waitFor(() => expect(queueReads).toBe(2));
+      expect(
+        screen.getByRole("button", { name: "Recovering latest state…" }),
+      ).toBeDisabled();
+      const back = screen.getByRole("button", { name: "Back to alerts" });
+      back.focus();
+      expect(back).toHaveFocus();
+
+      await act(async () => recovery.resolve(jsonResponse(resolvedDetail)));
+      expect(
+        await screen.findByText(/latest saved state is now loaded/i),
+      ).toBeVisible();
+      expect(
+        screen.queryByRole("button", { name: "Resolve alert" }),
+      ).toBeNull();
+      expect(
+        screen.queryByRole("button", { name: "Acknowledge alert" }),
+      ).toBeNull();
+      expect(detailReads).toBe(2);
+      expect(queueReads).toBe(2);
+      expect(commandCalls).toBe(1);
+      expect(back).toHaveFocus();
+    },
+  );
+
+  it("keeps stable detail focus from command submission through automatic recovery resolving the alert", async () => {
+    const { factory } = streamHarness();
+    const commandResponse = deferred<Response>();
+    const recovery = deferred<Response>();
+    let detailReads = 0;
+    let commandCalls = 0;
+    installFetch(async (url) => {
+      if (url === `/api/v1/alerts/${alertId}/acknowledge`) {
+        commandCalls += 1;
+        return commandResponse.promise;
+      }
+      if (url === `/api/v1/alerts/${alertId}`) {
+        detailReads += 1;
+        return detailReads === 1 ? jsonResponse(openDetail) : recovery.promise;
+      }
+      return queueResponse();
+    });
+
+    render(
+      <AlertPanel
+        roleCode="OPERATIONS_ADMIN"
+        csrfToken={csrfToken}
+        onSessionExpired={() => {}}
+        createEventSource={factory}
+      />,
+    );
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: /view open alert for boiler feed pump/i,
+      }),
+    );
+    const command = await screen.findByRole("button", {
+      name: "Acknowledge alert",
+    });
+    const detail = screen.getByRole("region", {
+      name: "High bearing temperature",
+    });
+    command.focus();
+    fireEvent.click(command);
+    expect(
+      screen.getByRole("button", { name: "Saving alert…" }),
+    ).toBeDisabled();
+    expect(detail).toHaveFocus();
+    expect(commandCalls).toBe(1);
+    expect(detailReads).toBe(1);
+
+    await act(async () => commandResponse.resolve(jsonResponse({}, 409)));
+    await waitFor(() => expect(detailReads).toBe(2));
+    expect(
+      screen.getByRole("button", { name: "Recovering latest state…" }),
+    ).toBeDisabled();
+    expect(detail).toHaveFocus();
+
+    await act(async () => recovery.resolve(jsonResponse(resolvedDetail)));
+    const feedback = await screen.findByText(
+      /latest saved state is now loaded/i,
+    );
+    expect(feedback).toBeVisible();
+    expect(detail).toHaveFocus();
+    expect(screen.queryByRole("button", { name: "Resolve alert" })).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Acknowledge alert" }),
+    ).toBeNull();
+    expect(detailReads).toBe(2);
+    expect(commandCalls).toBe(1);
+  });
+
+  it.each(["conflict", "uncertain"] as const)(
+    "preserves deliberately moved Create work order focus when explicit %s recovery retry resolves the alert",
+    async (reason) => {
+      const { factory } = streamHarness();
+      const recovery = deferred<Response>();
+      let detailReads = 0;
+      let queueReads = 0;
+      let commandCalls = 0;
+      installFetch(async (url, init) => {
+        if (url === `/api/v1/alerts/${alertId}/acknowledge`) {
+          expect(init?.method).toBe("POST");
+          commandCalls += 1;
+          if (reason === "uncertain") {
+            throw new TypeError("response lost");
+          }
+          return jsonResponse({}, 409);
+        }
+        if (url === `/api/v1/alerts/${alertId}`) {
+          detailReads += 1;
+          if (detailReads === 1) {
+            return jsonResponse(openDetail);
+          }
+          if (detailReads === 2) {
+            return jsonResponse({}, 503);
+          }
+          return recovery.promise;
+        }
+        expect(url).toBe("/api/v1/alerts?limit=50");
+        queueReads += 1;
+        return queueResponse();
+      });
+
+      render(
+        <AlertPanel
+          roleCode="OPERATIONS_ADMIN"
+          csrfToken={csrfToken}
+          onSessionExpired={() => {}}
+          createEventSource={factory}
+        />,
+      );
+      fireEvent.click(
+        await screen.findByRole("button", {
+          name: /view open alert for boiler feed pump/i,
+        }),
+      );
+      const command = await screen.findByRole("button", {
+        name: "Acknowledge alert",
+      });
+      command.focus();
+      fireEvent.click(command);
+      const retry = await screen.findByRole("button", {
+        name: "Retry latest state",
+      });
+      expect(
+        screen.getByRole("button", { name: "Latest state required" }),
+      ).toBeDisabled();
+      retry.focus();
+      fireEvent.click(retry);
+      const feedback = await screen.findByText(
+        "Retrying the latest saved alert state…",
+      );
+      expect(feedback).toHaveFocus();
+      await waitFor(() => expect(detailReads).toBe(3));
+      await waitFor(() => expect(queueReads).toBe(2));
+      expect(
+        screen.getByRole("button", { name: "Recovering latest state…" }),
+      ).toBeDisabled();
+      expect(
+        screen.queryByRole("button", { name: "Retry latest state" }),
+      ).toBeNull();
+      const create = screen.getByRole("button", { name: "Create work order" });
+      create.focus();
+      expect(create).toHaveFocus();
+
+      await act(async () => recovery.resolve(jsonResponse(resolvedDetail)));
+      expect(
+        await screen.findByText(/latest saved state is now loaded/i),
+      ).toBeVisible();
+      expect(
+        screen.queryByRole("button", { name: "Resolve alert" }),
+      ).toBeNull();
+      expect(
+        screen.queryByRole("button", { name: "Acknowledge alert" }),
+      ).toBeNull();
+      expect(detailReads).toBe(3);
+      expect(queueReads).toBe(2);
+      expect(commandCalls).toBe(1);
+      expect(create).toHaveFocus();
+    },
+  );
+
   it("keeps a stale command locked until an explicit recovery retry succeeds", async () => {
     const { factory } = streamHarness();
     let detailReads = 0;
@@ -848,8 +1078,10 @@ describe("live alert experience", () => {
     const ordinaryRefresh = deferred<Response>();
     const retryRefresh = deferred<Response>();
     let detailReads = 0;
+    let commandCalls = 0;
     installFetch(async (url) => {
       if (url === `/api/v1/alerts/${alertId}/acknowledge`) {
+        commandCalls += 1;
         return jsonResponse({}, 409);
       }
       if (url === `/api/v1/alerts/${alertId}`) {
@@ -901,13 +1133,19 @@ describe("live alert experience", () => {
 
     fireEvent.click(retryButton);
     await waitFor(() => expect(detailReads).toBe(4));
+    const back = screen.getByRole("button", { name: "Back to alerts" });
+    back.focus();
+    expect(back).toHaveFocus();
     await act(async () =>
-      ordinaryRefresh.resolve(jsonResponse(acknowledgedDetail)),
+      ordinaryRefresh.resolve(jsonResponse(resolvedDetail)),
     );
     expect(
       screen.getByRole("button", { name: "Recovering latest state…" }),
     ).toBeDisabled();
     expect(screen.queryByRole("button", { name: "Resolve alert" })).toBeNull();
+    expect(screen.queryByText(/latest saved state is now loaded/i)).toBeNull();
+    expect(back).toHaveFocus();
+    expect(commandCalls).toBe(1);
 
     await act(async () =>
       retryRefresh.resolve(jsonResponse(acknowledgedDetail)),
@@ -915,7 +1153,9 @@ describe("live alert experience", () => {
     expect(
       await screen.findByRole("button", { name: "Resolve alert" }),
     ).toBeEnabled();
+    expect(back).toHaveFocus();
     expect(detailReads).toBe(4);
+    expect(commandCalls).toBe(1);
   });
 
   it("moves retry focus to stable feedback and preserves it when recovery resolves the alert", async () => {

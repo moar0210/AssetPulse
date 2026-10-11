@@ -239,10 +239,7 @@ function AlertDetailPanel({
               detailFocus.current
                 ?.querySelector(".alert-actions")
                 ?.contains(focusedElement);
-            if (
-              detail.status === "RESOLVED" &&
-              (recoveryPending.current || focusedActionWillBeRemoved)
-            ) {
+            if (focusedActionWillBeRemoved) {
               focusStableDetailTarget();
             }
             setDetailState({ kind: "ready", detail, refreshFailed: false });
@@ -359,6 +356,13 @@ function AlertDetailPanel({
       return;
     }
 
+    if (
+      detailFocus.current
+        ?.querySelector(".alert-actions")
+        ?.contains(document.activeElement)
+    ) {
+      detailFocus.current?.focus();
+    }
     setActionState("submitting");
     setActionFeedback(null);
     cancelDetailRefresh();
