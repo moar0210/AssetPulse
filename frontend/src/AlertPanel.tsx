@@ -273,6 +273,7 @@ function AlertDetailPanel({
             return;
           }
           if (error instanceof AlertSessionExpiredError) {
+            cancelDetailRefresh();
             finishRecovery(false);
             onSessionExpired();
             return;
@@ -321,6 +322,7 @@ function AlertDetailPanel({
     },
     [
       alertId,
+      cancelDetailRefresh,
       finishRecovery,
       focusBeforeRemovingDetailContent,
       focusBeforeRemovingDetailRetry,
@@ -1046,6 +1048,8 @@ export function AlertPanel({
             return;
           }
           if (error instanceof AlertSessionExpiredError) {
+            queueTrailingRefresh.current = false;
+            queueTrailingShowLoading.current = false;
             onSessionExpired();
             return;
           }

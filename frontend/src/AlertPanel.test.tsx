@@ -295,6 +295,76 @@ describe("live alert experience", () => {
     expect(queueReads).toBe(2);
   });
 
+  it.each(["503", "malformed"] as const)(
+    "retains exactly one queued refresh after an active queue read returns %s",
+    async (failure) => {
+      const { source, factory } = streamHarness();
+      const activeRead = deferred<Response>();
+      const trailingRead = deferred<Response>();
+      const onSessionExpired = vi.fn();
+      let queueReads = 0;
+      const fetchMock = installFetch(async () => {
+        queueReads += 1;
+        if (queueReads === 1) return queueResponse();
+        if (queueReads === 2) return activeRead.promise;
+        if (queueReads === 3) return trailingRead.promise;
+        throw new Error("unexpected extra queue read");
+      });
+      render(
+        <AlertPanel
+          roleCode="VIEWER"
+          csrfToken={csrfToken}
+          onSessionExpired={onSessionExpired}
+          createEventSource={factory}
+        />,
+      );
+      await screen.findByText("1 occurrence");
+      await act(async () => source.emit("open"));
+      expect(queueReads).toBe(2);
+      for (const changeType of ["OCCURRENCE_RECORDED", "STATUS_CHANGED"]) {
+        await act(async () =>
+          source.emit("alert-changed", { alertId, changeType }),
+        );
+      }
+      expect(queueReads).toBe(2);
+
+      await act(async () =>
+        activeRead.resolve(
+          failure === "503"
+            ? jsonResponse({}, 503)
+            : jsonResponse({ alerts: [{ id: alertId }], limit: 50 }),
+        ),
+      );
+      await waitFor(() => expect(queueReads).toBe(3));
+      expect(screen.getByText("1 occurrence")).toBeVisible();
+      expect(
+        screen.getByText(
+          "Live refresh failed. The last confirmed alert queue is still shown.",
+        ),
+      ).toBeVisible();
+
+      await act(async () =>
+        trailingRead.resolve(
+          queueResponse([
+            {
+              ...summary,
+              occurrenceCount: refreshedOpenDetail.occurrenceCount,
+              lastOccurredAt: refreshedOpenDetail.lastOccurredAt,
+            },
+          ]),
+        ),
+      );
+      expect(await screen.findByText("2 occurrences")).toBeVisible();
+      expect(screen.queryByText(/Live refresh failed/)).toBeNull();
+      expect(queueReads).toBe(3);
+      expect(onSessionExpired).not.toHaveBeenCalled();
+      expect(source.close).not.toHaveBeenCalled();
+      expect(
+        fetchMock.mock.calls.every(([, init]) => init?.method === "GET"),
+      ).toBe(true);
+    },
+  );
+
   it("marks malformed stream data as degraded without claiming a reconnect", async () => {
     const { source, factory } = streamHarness();
     installFetch(async () => queueResponse());
@@ -422,6 +492,76 @@ describe("live alert experience", () => {
     expect(screen.getByText("2")).toBeVisible();
     expect(detailReads).toBe(2);
   });
+
+  it.each(["503", "malformed"] as const)(
+    "retains exactly one queued refresh after an active detail read returns %s",
+    async (failure) => {
+      const { source, factory } = streamHarness();
+      const activeRead = deferred<Response>();
+      const trailingRead = deferred<Response>();
+      const onSessionExpired = vi.fn();
+      let detailReads = 0;
+      const fetchMock = installFetch(async (url) => {
+        if (url === `/api/v1/alerts/${alertId}`) {
+          detailReads += 1;
+          if (detailReads === 1) return jsonResponse(openDetail);
+          if (detailReads === 2) return activeRead.promise;
+          if (detailReads === 3) return trailingRead.promise;
+          throw new Error("unexpected extra detail read");
+        }
+        return queueResponse();
+      });
+      render(
+        <AlertPanel
+          roleCode="VIEWER"
+          csrfToken={csrfToken}
+          onSessionExpired={onSessionExpired}
+          createEventSource={factory}
+        />,
+      );
+      fireEvent.click(
+        await screen.findByRole("button", {
+          name: /view open alert for boiler feed pump/i,
+        }),
+      );
+      await screen.findByRole("heading", { name: "High bearing temperature" });
+      await act(async () => source.emit("open"));
+      expect(detailReads).toBe(2);
+      for (const changeType of ["OCCURRENCE_RECORDED", "STATUS_CHANGED"]) {
+        await act(async () =>
+          source.emit("alert-changed", { alertId, changeType }),
+        );
+      }
+      expect(detailReads).toBe(2);
+
+      await act(async () =>
+        activeRead.resolve(
+          failure === "503"
+            ? jsonResponse({}, 503)
+            : jsonResponse({ id: alertId }),
+        ),
+      );
+      await waitFor(() => expect(detailReads).toBe(3));
+      expect(screen.getByText("1")).toBeVisible();
+      expect(
+        screen.getByText(
+          "Live refresh failed. The last confirmed alert detail is still shown.",
+        ),
+      ).toBeVisible();
+
+      await act(async () =>
+        trailingRead.resolve(jsonResponse(refreshedOpenDetail)),
+      );
+      expect(await screen.findByText("2")).toBeVisible();
+      expect(screen.queryByText(/Live refresh failed/)).toBeNull();
+      expect(detailReads).toBe(3);
+      expect(onSessionExpired).not.toHaveBeenCalled();
+      expect(source.close).not.toHaveBeenCalled();
+      expect(
+        fetchMock.mock.calls.every(([, init]) => init?.method === "GET"),
+      ).toBe(true);
+    },
+  );
 
   it("shows exact detail/history and submits the state-correct admin command", async () => {
     const { factory } = streamHarness();

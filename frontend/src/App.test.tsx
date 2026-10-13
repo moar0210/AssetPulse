@@ -402,6 +402,97 @@ describe("seeded session application", () => {
     expect(sources[0]?.close).toHaveBeenCalledOnce();
   });
 
+  it.each(["queue", "selected detail"] as const)(
+    "tears down an expired alert %s without starting its queued trailing read",
+    async (target) => {
+      const sources = installEventSource();
+      let expired = false;
+      let sessionReads = 0;
+      let targetReads = 0;
+      let releaseExpiredRead!: (response: Response) => void;
+      let releaseLateRead!: (response: Response) => void;
+      const expiredRead = new Promise<Response>((resolve) => {
+        releaseExpiredRead = resolve;
+      });
+      const lateRead = new Promise<Response>((resolve) => {
+        releaseLateRead = resolve;
+      });
+      const targetUrl =
+        target === "queue"
+          ? "/api/v1/alerts?limit=50"
+          : `/api/v1/alerts/${alertId}`;
+      const fetchMock = installFetch(async (url) => {
+        if (url === "/api/v1/status") return statusResponse();
+        if (url === "/api/v1/session/csrf") return jsonResponse(csrfToken);
+        if (url === "/api/v1/session") {
+          sessionReads += 1;
+          return expired ? jsonResponse({}, 401) : jsonResponse(identity);
+        }
+        if (url === targetUrl) {
+          targetReads += 1;
+          return targetReads === 1 ? expiredRead : lateRead;
+        }
+        if (url === "/api/v1/alerts?limit=50") {
+          return jsonResponse({ alerts: [alertSummary], limit: 50 });
+        }
+        throw new Error(`unexpected request: ${url}`);
+      });
+
+      render(<App />);
+      fireEvent.click(await screen.findByRole("button", { name: "Alerts" }));
+      if (target === "selected detail") {
+        fireEvent.click(
+          await screen.findByRole("button", {
+            name: /view open alert for boiler feed pump/i,
+          }),
+        );
+        expect(screen.getByText("Loading alert details…")).toBeVisible();
+      } else {
+        expect(screen.getByText("Loading alerts…")).toBeVisible();
+      }
+      await waitFor(() => expect(targetReads).toBe(1));
+      expect(sources).toHaveLength(1);
+      const source = sources[0]!;
+
+      await act(async () => source.emit("open"));
+      for (const changeType of ["OCCURRENCE_RECORDED", "STATUS_CHANGED"]) {
+        await act(async () =>
+          source.emit("alert-changed", { alertId, changeType }),
+        );
+      }
+      expect(targetReads).toBe(1);
+
+      expired = true;
+      await act(async () => releaseExpiredRead(jsonResponse({}, 401)));
+      expect(
+        await screen.findByRole("button", { name: "Sign in" }),
+      ).toBeEnabled();
+      expect(source.close).toHaveBeenCalledOnce();
+      expect(sessionReads).toBe(2);
+      expect(screen.queryByRole("button", { name: "Alerts" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "Sign out" })).toBeNull();
+      expect(targetReads).toBe(1);
+
+      const requestsAfterExpiry = fetchMock.mock.calls.length;
+      await act(async () => {
+        source.emit("open");
+        source.emit("error");
+        source.emit("alert-changed", { alertId, changeType: "STATUS_CHANGED" });
+        releaseLateRead(
+          target === "queue"
+            ? jsonResponse({ alerts: [alertSummary], limit: 50 })
+            : jsonResponse(openAlertDetail),
+        );
+      });
+      expect(screen.getByRole("button", { name: "Sign in" })).toBeEnabled();
+      expect(fetchMock).toHaveBeenCalledTimes(requestsAfterExpiry);
+      expect(targetReads).toBe(1);
+      expect(
+        fetchMock.mock.calls.some(([, init]) => init?.method === "POST"),
+      ).toBe(false);
+    },
+  );
+
   it("rediscovers authoritative session and CSRF after command verification fails", async () => {
     const sources = installEventSource();
     let csrfRequests = 0;
