@@ -153,6 +153,8 @@ function AlertDetailPanel({
   const detailTrailingRefresh = useRef(false);
   const recoveryPending = useRef(false);
   const detailFocus = useRef<HTMLElement | null>(null);
+  const detailContentFocus = useRef<HTMLDivElement | null>(null);
+  const detailRetryFocus = useRef<HTMLButtonElement | null>(null);
   const feedbackFocus = useRef<HTMLParagraphElement | null>(null);
   const createFeedbackFocus = useRef<HTMLParagraphElement | null>(null);
   const focusFeedbackAfterUpdate = useRef(false);
@@ -198,6 +200,21 @@ function AlertDetailPanel({
     (feedbackFocus.current ?? detailFocus.current)?.focus();
   }, []);
 
+  const focusBeforeRemovingDetailRetry = useCallback(() => {
+    if (
+      detailRetryFocus.current !== null &&
+      detailRetryFocus.current === document.activeElement
+    ) {
+      detailFocus.current?.focus();
+    }
+  }, []);
+
+  const focusBeforeRemovingDetailContent = useCallback(() => {
+    if (detailContentFocus.current?.contains(document.activeElement)) {
+      detailFocus.current?.focus();
+    }
+  }, []);
+
   const refreshDetail = useCallback(
     function requestDetailRefresh(showLoading: boolean) {
       if (!mounted.current) {
@@ -220,6 +237,7 @@ function AlertDetailPanel({
       );
 
       if (showLoading) {
+        focusBeforeRemovingDetailRetry();
         setDetailState((current) =>
           current.kind === "ready" ? current : { kind: "loading" },
         );
@@ -239,12 +257,10 @@ function AlertDetailPanel({
               detailFocus.current
                 ?.querySelector(".alert-actions")
                 ?.contains(focusedElement);
-            if (
-              detail.status === "RESOLVED" &&
-              (recoveryPending.current || focusedActionWillBeRemoved)
-            ) {
+            if (focusedActionWillBeRemoved) {
               focusStableDetailTarget();
             }
+            focusBeforeRemovingDetailRetry();
             setDetailState({ kind: "ready", detail, refreshFailed: false });
             finishRecovery(true);
           }
@@ -257,11 +273,14 @@ function AlertDetailPanel({
             return;
           }
           if (error instanceof AlertSessionExpiredError) {
+            cancelDetailRefresh();
             finishRecovery(false);
             onSessionExpired();
             return;
           }
           if (error instanceof AlertNotFoundError) {
+            focusBeforeRemovingDetailContent();
+            focusBeforeRemovingDetailRetry();
             setDetailState({ kind: "not-found" });
             if (!detailTrailingRefresh.current) {
               finishRecovery(false);
@@ -269,6 +288,8 @@ function AlertDetailPanel({
             return;
           }
           if (error instanceof AlertForbiddenError) {
+            focusBeforeRemovingDetailContent();
+            focusBeforeRemovingDetailRetry();
             setDetailState({ kind: "forbidden" });
             if (!detailTrailingRefresh.current) {
               finishRecovery(false);
@@ -299,7 +320,15 @@ function AlertDetailPanel({
           }
         });
     },
-    [alertId, finishRecovery, focusStableDetailTarget, onSessionExpired],
+    [
+      alertId,
+      cancelDetailRefresh,
+      finishRecovery,
+      focusBeforeRemovingDetailContent,
+      focusBeforeRemovingDetailRetry,
+      focusStableDetailTarget,
+      onSessionExpired,
+    ],
   );
 
   useEffect(() => {
@@ -359,6 +388,13 @@ function AlertDetailPanel({
       return;
     }
 
+    if (
+      detailFocus.current
+        ?.querySelector(".alert-actions")
+        ?.contains(document.activeElement)
+    ) {
+      detailFocus.current?.focus();
+    }
     setActionState("submitting");
     setActionFeedback(null);
     cancelDetailRefresh();
@@ -401,6 +437,7 @@ function AlertDetailPanel({
         return;
       }
       if (error instanceof AlertNotFoundError) {
+        focusBeforeRemovingDetailContent();
         setDetailState({ kind: "not-found" });
         onRefreshQueue();
         return;
@@ -679,6 +716,7 @@ function AlertDetailPanel({
           <button
             className="secondary-button secondary-button--compact"
             type="button"
+            ref={detailRetryFocus}
             onClick={() => refreshDetail(true)}
           >
             Retry alert details
@@ -687,7 +725,7 @@ function AlertDetailPanel({
       )}
 
       {detailState.kind === "ready" && (
-        <div className="alert-detail__content">
+        <div ref={detailContentFocus} className="alert-detail__content">
           <header className="alert-detail__header">
             <div>
               <p className="eyebrow">Live incident</p>
@@ -1010,6 +1048,8 @@ export function AlertPanel({
             return;
           }
           if (error instanceof AlertSessionExpiredError) {
+            queueTrailingRefresh.current = false;
+            queueTrailingShowLoading.current = false;
             onSessionExpired();
             return;
           }

@@ -2,14 +2,17 @@ package io.github.moar0210.assetpulse.alerts;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 
 import java.io.IOException;
+import java.lang.reflect.RecordComponent;
 import java.util.ArrayDeque;
 import java.util.List;
+import java.util.Map;
 import java.util.Queue;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -20,17 +23,73 @@ import java.util.concurrent.Future;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
+import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.springframework.http.MediaType;
 import org.springframework.mock.web.MockHttpSession;
+import org.springframework.web.servlet.ModelAndView;
 import org.springframework.web.servlet.mvc.method.annotation.ResponseBodyEmitter;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
+import org.springframework.web.servlet.view.FragmentsRendering;
+import org.springframework.web.servlet.view.InternalResourceView;
 
 class AlertStreamServiceTest {
 
     private static final UUID NORTHSTAR_ID = UUID.randomUUID();
     private static final UUID RIVERSIDE_ID = UUID.randomUUID();
     private static final UUID ALERT_ID = UUID.randomUUID();
+
+    @Test
+    @DisplayName(
+            "AUTH-04, ALR-03: every emitted SSE payload is fixed JSON rather than a view fragment")
+    void readyAndEveryChangeTypeEmitOnlyTheReviewedJsonSchema() {
+        CapturingEmitter emitter = new CapturingEmitter();
+        AlertStreamService service = serviceWith(emitter);
+        service.subscribe(NORTHSTAR_ID, new MockHttpSession());
+        for (AlertChangeType changeType : AlertChangeType.values()) {
+            service.publish(NORTHSTAR_ID, new AlertChangeEvent(ALERT_ID, changeType));
+        }
+
+        assertThat(emitter.events).hasSize(1 + AlertChangeType.values().length);
+        assertJsonFrame(emitter.events.getFirst(), "ready", Map.of());
+        for (int index = 0; index < AlertChangeType.values().length; index++) {
+            assertJsonFrame(
+                    emitter.events.get(index + 1),
+                    "alert-changed",
+                    new AlertChangeEvent(ALERT_ID, AlertChangeType.values()[index]));
+        }
+    }
+
+    @Test
+    void jsonPayloadGuardRejectsViewFragmentsViewsAndUnreviewedData() {
+        for (Object payload :
+                List.of(
+                        FragmentsRendering.fragment("unsafe").build(),
+                        new ModelAndView("unsafe"),
+                        new InternalResourceView("unsafe"),
+                        Map.of("view", new ModelAndView("unsafe")),
+                        "unreviewed\r\nevent:injected")) {
+            var data =
+                    new ResponseBodyEmitter.DataWithMediaType(payload, MediaType.APPLICATION_JSON);
+            assertThatThrownBy(() -> assertReviewedJsonPayload(data))
+                    .as("SSE payload %s", payload.getClass().getName())
+                    .isInstanceOf(AssertionError.class);
+        }
+        for (MediaType mediaType : List.of(MediaType.TEXT_HTML, MediaType.TEXT_PLAIN)) {
+            var data =
+                    new ResponseBodyEmitter.DataWithMediaType(
+                            new AlertChangeEvent(ALERT_ID, AlertChangeType.STATUS_CHANGED),
+                            mediaType);
+            assertThatThrownBy(() -> assertReviewedJsonPayload(data))
+                    .isInstanceOf(AssertionError.class);
+        }
+        assertThatThrownBy(
+                        () ->
+                                assertReviewedJsonPayload(
+                                        new ResponseBodyEmitter.DataWithMediaType(Map.of(), null)))
+                .isInstanceOf(AssertionError.class);
+    }
 
     @Test
     void publishesTheExplicitInvalidationOnlyToTheMatchingOrganisation() {
@@ -222,6 +281,33 @@ class AlertStreamServiceTest {
     private AlertStreamService serviceWith(SseEmitter... emitters) {
         Queue<SseEmitter> available = new ArrayDeque<>(List.of(emitters));
         return new AlertStreamService(30_000, ignored -> available.remove(), Runnable::run);
+    }
+
+    private static void assertJsonFrame(
+            List<ResponseBodyEmitter.DataWithMediaType> parts, String eventName, Object payload) {
+        assertThat(parts).hasSize(3);
+        assertThat(parts.getFirst().getData()).isEqualTo("event:" + eventName + "\ndata:");
+        assertThat(parts.getFirst().getMediaType().isCompatibleWith(MediaType.TEXT_PLAIN)).isTrue();
+        assertReviewedJsonPayload(parts.get(1));
+        assertThat(parts.get(1).getData()).isEqualTo(payload);
+        assertThat(parts.getLast().getData()).isEqualTo("\n\n");
+        assertThat(parts.getLast().getMediaType().isCompatibleWith(MediaType.TEXT_PLAIN)).isTrue();
+    }
+
+    private static void assertReviewedJsonPayload(ResponseBodyEmitter.DataWithMediaType data) {
+        assertThat(data.getMediaType()).isEqualTo(MediaType.APPLICATION_JSON);
+        Object payload = data.getData();
+        if (payload instanceof Map<?, ?> map) {
+            assertThat(map).isEmpty();
+            return;
+        }
+        assertThat(payload).isExactlyInstanceOf(AlertChangeEvent.class);
+        assertThat(AlertChangeEvent.class.getRecordComponents())
+                .extracting(RecordComponent::getName)
+                .containsExactly("alertId", "changeType");
+        assertThat(AlertChangeEvent.class.getRecordComponents())
+                .extracting(RecordComponent::getType)
+                .containsExactly(UUID.class, AlertChangeType.class);
     }
 
     private static boolean awaitPayloadCount(CapturingEmitter emitter, int expected)
