@@ -153,6 +153,7 @@ function AlertDetailPanel({
   const detailTrailingRefresh = useRef(false);
   const recoveryPending = useRef(false);
   const detailFocus = useRef<HTMLElement | null>(null);
+  const detailContentFocus = useRef<HTMLDivElement | null>(null);
   const detailRetryFocus = useRef<HTMLButtonElement | null>(null);
   const feedbackFocus = useRef<HTMLParagraphElement | null>(null);
   const createFeedbackFocus = useRef<HTMLParagraphElement | null>(null);
@@ -204,6 +205,12 @@ function AlertDetailPanel({
       detailRetryFocus.current !== null &&
       detailRetryFocus.current === document.activeElement
     ) {
+      detailFocus.current?.focus();
+    }
+  }, []);
+
+  const focusBeforeRemovingDetailContent = useCallback(() => {
+    if (detailContentFocus.current?.contains(document.activeElement)) {
       detailFocus.current?.focus();
     }
   }, []);
@@ -271,6 +278,7 @@ function AlertDetailPanel({
             return;
           }
           if (error instanceof AlertNotFoundError) {
+            focusBeforeRemovingDetailContent();
             focusBeforeRemovingDetailRetry();
             setDetailState({ kind: "not-found" });
             if (!detailTrailingRefresh.current) {
@@ -279,6 +287,7 @@ function AlertDetailPanel({
             return;
           }
           if (error instanceof AlertForbiddenError) {
+            focusBeforeRemovingDetailContent();
             focusBeforeRemovingDetailRetry();
             setDetailState({ kind: "forbidden" });
             if (!detailTrailingRefresh.current) {
@@ -313,6 +322,7 @@ function AlertDetailPanel({
     [
       alertId,
       finishRecovery,
+      focusBeforeRemovingDetailContent,
       focusBeforeRemovingDetailRetry,
       focusStableDetailTarget,
       onSessionExpired,
@@ -425,6 +435,7 @@ function AlertDetailPanel({
         return;
       }
       if (error instanceof AlertNotFoundError) {
+        focusBeforeRemovingDetailContent();
         setDetailState({ kind: "not-found" });
         onRefreshQueue();
         return;
@@ -712,7 +723,7 @@ function AlertDetailPanel({
       )}
 
       {detailState.kind === "ready" && (
-        <div className="alert-detail__content">
+        <div ref={detailContentFocus} className="alert-detail__content">
           <header className="alert-detail__header">
             <div>
               <p className="eyebrow">Live incident</p>

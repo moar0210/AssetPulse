@@ -1327,6 +1327,371 @@ describe("live alert experience", () => {
     ).toBeVisible();
   });
 
+  describe("ALR-03: ready alert detail denial focus", () => {
+    it.each(["Create work order", "Back to alerts"] as const)(
+      "preserves an appropriate target after focus moves to %s before a command returns 404",
+      async (target) => {
+        const { factory } = streamHarness();
+        const commandResponse = deferred<Response>();
+        const onSessionExpired = vi.fn();
+        let commandCalls = 0;
+        let detailReads = 0;
+        let queueReads = 0;
+        installFetch(async (url, init) => {
+          if (url === `/api/v1/alerts/${alertId}/acknowledge`) {
+            expect(init?.method).toBe("POST");
+            commandCalls += 1;
+            return commandResponse.promise;
+          }
+          if (url === `/api/v1/alerts/${alertId}`) {
+            detailReads += 1;
+            return jsonResponse(openDetail);
+          }
+          expect(url).toBe("/api/v1/alerts?limit=50");
+          queueReads += 1;
+          return queueResponse();
+        });
+        render(
+          <AlertPanel
+            roleCode="OPERATIONS_ADMIN"
+            csrfToken={csrfToken}
+            onSessionExpired={onSessionExpired}
+            createEventSource={factory}
+          />,
+        );
+        fireEvent.click(
+          await screen.findByRole("button", {
+            name: /view open alert for boiler feed pump/i,
+          }),
+        );
+        const command = await screen.findByRole("button", {
+          name: "Acknowledge alert",
+        });
+        const detail = screen.getByRole("region", {
+          name: "High bearing temperature",
+        });
+        command.focus();
+        fireEvent.click(command);
+        expect(
+          screen.getByRole("button", { name: "Saving alert…" }),
+        ).toBeDisabled();
+        const movedTarget = screen.getByRole("button", { name: target });
+        movedTarget.focus();
+
+        await act(async () =>
+          commandResponse.resolve(
+            jsonResponse({ detail: "Riverside secret compressor" }, 404),
+          ),
+        );
+        expect(
+          screen.getByRole("heading", { name: "Alert not found" }),
+        ).toBeVisible();
+        expect(
+          target === "Back to alerts" ? movedTarget : detail,
+        ).toHaveFocus();
+        expect(screen.queryByText(/Riverside|compressor/)).toBeNull();
+        expect(onSessionExpired).not.toHaveBeenCalled();
+        expect(commandCalls).toBe(1);
+        expect(detailReads).toBe(1);
+        expect(queueReads).toBe(2);
+      },
+    );
+
+    it.each(
+      (["Acknowledge alert", "Create work order"] as const).flatMap((target) =>
+        (["403", "404", "503", "malformed"] as const).map((outcome) => ({
+          target,
+          outcome,
+        })),
+      ),
+    )(
+      "preserves focus when a refresh of ready detail finishes with $outcome while $target is focused",
+      async ({ target, outcome }) => {
+        const { source, factory } = streamHarness();
+        const refreshResponse = deferred<Response>();
+        const onSessionExpired = vi.fn();
+        let detailReads = 0;
+        let queueReads = 0;
+        const fetchMock = installFetch(async (url) => {
+          if (url === `/api/v1/alerts/${alertId}`) {
+            detailReads += 1;
+            return detailReads === 1
+              ? jsonResponse(openDetail)
+              : refreshResponse.promise;
+          }
+          expect(url).toBe("/api/v1/alerts?limit=50");
+          queueReads += 1;
+          return queueResponse();
+        });
+        render(
+          <AlertPanel
+            roleCode="OPERATIONS_ADMIN"
+            csrfToken={csrfToken}
+            onSessionExpired={onSessionExpired}
+            createEventSource={factory}
+          />,
+        );
+        fireEvent.click(
+          await screen.findByRole("button", {
+            name: /view open alert for boiler feed pump/i,
+          }),
+        );
+        const control = await screen.findByRole("button", { name: target });
+        const detail = screen.getByRole("region", {
+          name: "High bearing temperature",
+        });
+        control.focus();
+        await act(async () =>
+          source.emit("alert-changed", {
+            alertId,
+            changeType: "STATUS_CHANGED",
+          }),
+        );
+        expect(detailReads).toBe(2);
+        expect(control).toHaveFocus();
+
+        await act(async () =>
+          refreshResponse.resolve(
+            outcome === "malformed"
+              ? jsonResponse({ id: alertId })
+              : jsonResponse(
+                  { detail: "Riverside secret compressor" },
+                  Number(outcome),
+                ),
+          ),
+        );
+
+        if (outcome === "403" || outcome === "404") {
+          expect(
+            screen.getByRole("heading", {
+              name:
+                outcome === "403" ? "Alert access denied" : "Alert not found",
+            }),
+          ).toBeVisible();
+          expect(screen.queryByRole("button", { name: target })).toBeNull();
+          expect(detail).toHaveFocus();
+        } else {
+          expect(
+            screen.getByText(
+              "Live refresh failed. The last confirmed alert detail is still shown.",
+            ),
+          ).toBeVisible();
+          expect(screen.getByRole("button", { name: target })).toBe(control);
+          expect(control).toBeEnabled();
+          expect(control).toHaveFocus();
+        }
+        expect(screen.queryByText(/Riverside|compressor/)).toBeNull();
+        expect(onSessionExpired).not.toHaveBeenCalled();
+        expect(detailReads).toBe(2);
+        expect(queueReads).toBe(2);
+        expect(
+          fetchMock.mock.calls.every(([, init]) => init?.method === "GET"),
+        ).toBe(true);
+      },
+    );
+
+    it.each([403, 404])(
+      "preserves deliberately moved Back focus when ready detail receives %s",
+      async (status) => {
+        const { source, factory } = streamHarness();
+        const refreshResponse = deferred<Response>();
+        let detailReads = 0;
+        const fetchMock = installFetch(async (url) => {
+          if (url === `/api/v1/alerts/${alertId}`) {
+            detailReads += 1;
+            return detailReads === 1
+              ? jsonResponse(openDetail)
+              : refreshResponse.promise;
+          }
+          expect(url).toBe("/api/v1/alerts?limit=50");
+          return queueResponse();
+        });
+        render(
+          <AlertPanel
+            roleCode="OPERATIONS_ADMIN"
+            csrfToken={csrfToken}
+            onSessionExpired={() => {}}
+            createEventSource={factory}
+          />,
+        );
+        fireEvent.click(
+          await screen.findByRole("button", {
+            name: /view open alert for boiler feed pump/i,
+          }),
+        );
+        const control = await screen.findByRole("button", {
+          name: "Create work order",
+        });
+        control.focus();
+        await act(async () =>
+          source.emit("alert-changed", {
+            alertId,
+            changeType: "STATUS_CHANGED",
+          }),
+        );
+        expect(detailReads).toBe(2);
+        const back = screen.getByRole("button", { name: "Back to alerts" });
+        back.focus();
+
+        await act(async () =>
+          refreshResponse.resolve(jsonResponse({}, status)),
+        );
+        expect(
+          screen.getByRole("heading", {
+            name: status === 403 ? "Alert access denied" : "Alert not found",
+          }),
+        ).toBeVisible();
+        expect(back).toHaveFocus();
+        expect(detailReads).toBe(2);
+        expect(fetchMock).toHaveBeenCalledTimes(4);
+        expect(
+          fetchMock.mock.calls.every(([, init]) => init?.method === "GET"),
+        ).toBe(true);
+      },
+    );
+
+    it.each(
+      (
+        [
+          "command feedback",
+          "command retry",
+          "creation feedback",
+          "creation retry",
+        ] as const
+      ).flatMap((target) =>
+        ([403, 404] as const).map((status) => ({ target, status })),
+      ),
+    )(
+      "moves focused $target to stable detail when a read returns $status",
+      async ({ target, status }) => {
+        const { source, factory } = streamHarness();
+        const refreshResponse = deferred<Response>();
+        const onSessionExpired = vi.fn();
+        let detailReads = 0;
+        let queueReads = 0;
+        let workOrderReads = 0;
+        let commandCalls = 0;
+        let createCalls = 0;
+        installFetch(async (url, init) => {
+          if (url === `/api/v1/alerts/${alertId}/acknowledge`) {
+            expect(init?.method).toBe("POST");
+            commandCalls += 1;
+            return target === "command feedback"
+              ? jsonResponse(acknowledgedDetail)
+              : jsonResponse({}, 409);
+          }
+          if (url === "/api/v1/work-orders") {
+            expect(init?.method).toBe("POST");
+            createCalls += 1;
+            throw new TypeError("response lost");
+          }
+          if (url === "/api/v1/work-orders?limit=50") {
+            expect(init?.method).toBe("GET");
+            workOrderReads += 1;
+            return jsonResponse({}, 503);
+          }
+          if (url === `/api/v1/alerts/${alertId}`) {
+            detailReads += 1;
+            if (detailReads === 1) {
+              return jsonResponse(openDetail);
+            }
+            return target === "command retry" && detailReads === 2
+              ? jsonResponse({}, 503)
+              : refreshResponse.promise;
+          }
+          expect(url).toBe("/api/v1/alerts?limit=50");
+          queueReads += 1;
+          return queueResponse();
+        });
+        render(
+          <AlertPanel
+            roleCode="OPERATIONS_ADMIN"
+            csrfToken={csrfToken}
+            onSessionExpired={onSessionExpired}
+            createEventSource={factory}
+          />,
+        );
+        fireEvent.click(
+          await screen.findByRole("button", {
+            name: /view open alert for boiler feed pump/i,
+          }),
+        );
+        const command = await screen.findByRole("button", {
+          name: "Acknowledge alert",
+        });
+        const detail = screen.getByRole("region", {
+          name: "High bearing temperature",
+        });
+        let focusedTarget: HTMLElement;
+        if (target === "command feedback" || target === "command retry") {
+          command.focus();
+          fireEvent.click(command);
+          if (target === "command feedback") {
+            focusedTarget = await screen.findByText("Alert acknowledged.");
+            await waitFor(() => expect(focusedTarget).toHaveFocus());
+          } else {
+            focusedTarget = await screen.findByRole("button", {
+              name: "Retry latest state",
+            });
+            focusedTarget.focus();
+          }
+          await waitFor(() => expect(queueReads).toBe(2));
+        } else {
+          fireEvent.click(
+            screen.getByRole("button", { name: "Create work order" }),
+          );
+          const retry = await screen.findByRole("button", {
+            name: "Retry authoritative check",
+          });
+          retry.focus();
+          if (target === "creation feedback") {
+            fireEvent.click(retry);
+            focusedTarget = await screen.findByText(
+              "The create result and saved work-order queue could not be confirmed. Retry authoritative recovery before creating again.",
+            );
+            expect(workOrderReads).toBe(2);
+          } else {
+            focusedTarget = retry;
+          }
+        }
+        expect(focusedTarget).toHaveFocus();
+        await act(async () =>
+          source.emit("alert-changed", {
+            alertId,
+            changeType: "STATUS_CHANGED",
+          }),
+        );
+        expect(focusedTarget).toHaveFocus();
+
+        await act(async () =>
+          refreshResponse.resolve(
+            jsonResponse({ detail: "Riverside secret compressor" }, status),
+          ),
+        );
+        expect(
+          screen.getByRole("heading", {
+            name: status === 403 ? "Alert access denied" : "Alert not found",
+          }),
+        ).toBeVisible();
+        expect(focusedTarget).not.toBeInTheDocument();
+        expect(detail).toHaveFocus();
+        expect(screen.queryByText(/Riverside|compressor/)).toBeNull();
+        expect(onSessionExpired).not.toHaveBeenCalled();
+        expect(commandCalls).toBe(target.startsWith("command") ? 1 : 0);
+        expect(createCalls).toBe(target.startsWith("creation") ? 1 : 0);
+        expect(detailReads).toBe(target === "command retry" ? 3 : 2);
+        expect(queueReads).toBe(target.startsWith("command") ? 3 : 2);
+        expect(workOrderReads).toBe(
+          target === "creation feedback"
+            ? 2
+            : target === "creation retry"
+              ? 1
+              : 0,
+        );
+      },
+    );
+  });
+
   describe("ALR-03: unavailable alert detail lifecycle", () => {
     const initialFailures = ["503", "malformed"] as const;
 
