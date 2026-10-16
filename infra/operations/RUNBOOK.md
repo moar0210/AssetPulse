@@ -69,6 +69,11 @@ parses that document and verifies the exact operation inventory, security and
 role declarations, local references, and critical schema bounds before it
 creates an authenticated session.
 
+The verifier also loads the root document and its same-origin JavaScript and
+stylesheet assets. A healthy API alone cannot establish that the product page
+can load. These fetch checks complement the browser journey; they do not execute
+the application JavaScript.
+
 Run both simulator scenarios using the commands in `simulator/USAGE.md`. Run the
 bounded performance scenario only after browser activity has ended, following
 `infra/performance/README.md`. Save its raw summary, command, region, runtime limits,

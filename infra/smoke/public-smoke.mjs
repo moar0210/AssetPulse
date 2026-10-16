@@ -18,6 +18,9 @@ const OPENAPI_STATIC_SECURITY_HEADERS = Object.freeze({
 });
 const READY_EVENT_FRAME = "event:ready\ndata:{}\n\n";
 const MAX_SSE_FRAME_CHARACTERS = 4_096;
+const MAX_WEB_DOCUMENT_BYTES = 65_536;
+const MAX_WEB_ASSET_BYTES = 2_097_152;
+const MAX_WEB_ASSETS = 16;
 const SESSION_COOKIE = "ASSETPULSE_SESSION";
 const NORTHSTAR_EMAIL = "admin@northstar.example";
 const NORTHSTAR_PASSWORD = "AssetPulse1!";
@@ -492,6 +495,152 @@ async function exactPublicEndpoints(baseUrl, fetchImpl, requestTimeoutMs) {
   }
 }
 
+async function readBoundedWebBody(response, maximumBytes, check) {
+  if (!response.body) {
+    fail(check, "expected a nonempty response body");
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let receivedBytes = 0;
+  let text = "";
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        return text + decoder.decode();
+      }
+      receivedBytes += value.byteLength;
+      if (receivedBytes > maximumBytes) {
+        fail(check, `response body exceeds ${maximumBytes} bytes`);
+      }
+      text += decoder.decode(value, { stream: true });
+    }
+  } catch (cause) {
+    if (cause instanceof SmokeVerificationError) {
+      throw cause;
+    }
+    fail(check, "could not read response body within the request deadline", {
+      cause,
+    });
+  } finally {
+    await reader.cancel().catch(() => {});
+    reader.releaseLock();
+  }
+}
+
+function htmlAttribute(tag, name) {
+  return new RegExp(`\\s${name}\\s*=\\s*(["'])(.*?)\\1`, "iu").exec(tag)?.[2];
+}
+
+function builtWebAssets(document, baseUrl, check) {
+  const html = document.replace(/<!--[\s\S]*?-->/gu, "");
+  const root = [...html.matchAll(/<div\b[^>]*>/giu)].some(
+    ([tag]) => htmlAttribute(tag, "id") === "root",
+  );
+  if (!root) {
+    fail(check, "expected the application root element");
+  }
+  const assets = new Map();
+  for (const [tag, element] of html.matchAll(/<(script|link)\b[^>]*>/giu)) {
+    let kind;
+    let reference;
+    if (
+      element.toLowerCase() === "script" &&
+      htmlAttribute(tag, "type") === "module"
+    ) {
+      kind = "script";
+      reference = htmlAttribute(tag, "src");
+    } else if (
+      element.toLowerCase() === "link" &&
+      htmlAttribute(tag, "rel")?.split(/\s+/u).includes("stylesheet")
+    ) {
+      kind = "stylesheet";
+      reference = htmlAttribute(tag, "href");
+    } else {
+      continue;
+    }
+    let url;
+    try {
+      url = new URL(reference ?? "", `${baseUrl}/`);
+    } catch {
+      fail(check, "expected a same-origin built asset reference");
+    }
+    const suffix = kind === "script" ? ".js" : ".css";
+    if (
+      url.origin !== baseUrl ||
+      url.username ||
+      url.password ||
+      !/^\/assets\/[^/]+$/u.test(url.pathname) ||
+      !url.pathname.endsWith(suffix)
+    ) {
+      fail(check, "expected a same-origin built asset reference");
+    }
+    assets.set(url.href, kind);
+    if (assets.size > MAX_WEB_ASSETS) {
+      fail(check, `expected at most ${MAX_WEB_ASSETS} built assets`);
+    }
+  }
+  if (
+    ![...assets.values()].includes("script") ||
+    ![...assets.values()].includes("stylesheet")
+  ) {
+    fail(check, "expected a built module script and stylesheet");
+  }
+  return assets;
+}
+
+async function verifyPublicWebEntry(baseUrl, fetchImpl, requestTimeoutMs) {
+  const check = "public-web-entry-and-assets";
+  const { response } = await fetchResponse(fetchImpl, `${baseUrl}/`, {
+    check,
+    requestTimeoutMs,
+    method: "GET",
+    headers: { Accept: "text/html" },
+  });
+  assertStatus(response, 200, check);
+  assertMediaType(response, "text/html", check);
+  assertStrictTransportSecurity(response, baseUrl, check);
+  const document = await readBoundedWebBody(
+    response,
+    MAX_WEB_DOCUMENT_BYTES,
+    check,
+  );
+  const assets = builtWebAssets(document, baseUrl, check);
+  for (const [url, kind] of assets) {
+    const { response: asset } = await fetchResponse(fetchImpl, url, {
+      check,
+      requestTimeoutMs,
+      method: "GET",
+      headers: {
+        Accept:
+          kind === "script"
+            ? "text/javascript, application/javascript"
+            : "text/css",
+      },
+    });
+    assertStatus(asset, 200, check);
+    assertStrictTransportSecurity(asset, baseUrl, check);
+    if (kind === "script") {
+      if (
+        !["text/javascript", "application/javascript"].includes(
+          mediaType(asset),
+        )
+      ) {
+        fail(check, "expected a JavaScript Content-Type");
+      }
+    } else {
+      assertMediaType(asset, "text/css", check);
+    }
+    const body = await readBoundedWebBody(asset, MAX_WEB_ASSET_BYTES, check);
+    if (body.trim().length === 0) {
+      fail(check, "expected a nonempty built asset");
+    }
+    if (/^\s*(?:<!doctype\s+html|<html\b)/iu.test(body)) {
+      fail(check, "received an HTML fallback instead of a built asset");
+    }
+  }
+}
+
 export async function waitForReadiness({
   baseUrl,
   fetchImpl = globalThis.fetch,
@@ -796,6 +945,9 @@ export async function runPublicSmoke({
     sleep,
   });
   complete("readiness-and-public-endpoints");
+
+  await verifyPublicWebEntry(normalizedBaseUrl, fetchImpl, requestTimeoutMs);
+  complete("public-web-entry-and-assets");
 
   await verifyPublicOpenApiContract(
     normalizedBaseUrl,

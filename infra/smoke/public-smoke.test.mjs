@@ -16,6 +16,24 @@ const RIVERSIDE_ID = "00000000-0000-0000-0000-000000000002";
 const SESSION_COOKIE =
   "Path=/; Max-Age=1800; Secure; HttpOnly; SameSite=Strict";
 const READY_EVENT_FRAME = "event:ready\ndata:{}\n\n";
+const WEB_DOCUMENT = `<!doctype html>
+<html><head><title>AssetPulse Lite</title>
+<script type="module" crossorigin src="/assets/index-test.js"></script>
+<link rel="stylesheet" crossorigin href="/assets/index-test.css">
+</head><body><div id="root"></div></body></html>`;
+const WEB_RESPONSES = {
+  "/": { status: 200, contentType: "text/html", body: WEB_DOCUMENT },
+  "/assets/index-test.js": {
+    status: 200,
+    contentType: "application/javascript",
+    body: 'document.getElementById("root").textContent = "AssetPulse Lite";',
+  },
+  "/assets/index-test.css": {
+    status: 200,
+    contentType: "text/css",
+    body: "body { color: #111; }",
+  },
+};
 const OPENAPI_SECURITY_HEADERS = Object.freeze({
   "Content-Security-Policy":
     "default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
@@ -97,6 +115,7 @@ function hasCookie(request, value) {
 }
 
 async function startMockApplication({
+  webResponses = {},
   leakCrossTenantAsset = false,
   openApiBody = OPENAPI_DOCUMENT,
   openApiCacheControl = "no-cache",
@@ -113,11 +132,31 @@ async function startMockApplication({
     spoofRequest: null,
     streamConnections: 0,
     handlerError: null,
+    webRequests: [],
   };
 
   const server = http.createServer((request, response) => {
     void (async () => {
       const url = new URL(request.url, "http://127.0.0.1");
+
+      const webResponse =
+        webResponses[url.pathname] ?? WEB_RESPONSES[url.pathname];
+      if (request.method === "GET" && webResponse !== undefined) {
+        state.webRequests.push({
+          path: url.pathname,
+          accept: request.headers.accept,
+          cookie: request.headers.cookie ?? null,
+        });
+        response.writeHead(webResponse.status, {
+          "Content-Type": webResponse.contentType,
+        });
+        if (webResponse.stall) {
+          response.write(webResponse.body);
+          return;
+        }
+        response.end(webResponse.body);
+        return;
+      }
 
       if (request.method === "GET" && url.pathname === "/healthz") {
         state.healthChecks += 1;
@@ -313,6 +352,15 @@ test("the public smoke journey succeeds and sends direct tenant spoof markers", 
   assert.equal(application.state.handlerError, null);
   assert.equal(application.state.healthChecks, 2);
   assert.equal(application.state.loginAccepted, true);
+  assert.deepEqual(application.state.webRequests, [
+    { path: "/", accept: "text/html", cookie: null },
+    {
+      path: "/assets/index-test.js",
+      accept: "text/javascript, application/javascript",
+      cookie: null,
+    },
+    { path: "/assets/index-test.css", accept: "text/css", cookie: null },
+  ]);
   assert.deepEqual(application.state.openApiRequest, {
     accept: "application/json",
     authenticated: false,
@@ -332,6 +380,7 @@ test("the public smoke journey succeeds and sends direct tenant spoof markers", 
   });
   assert.deepEqual(result.checks, [
     "readiness-and-public-endpoints",
+    "public-web-entry-and-assets",
     "public-openapi-contract",
     "csrf-and-secure-session-cookie",
     "seeded-northstar-login",
@@ -341,6 +390,214 @@ test("the public smoke journey succeeds and sends direct tenant spoof markers", 
     "logout",
     "post-logout-assets-denied",
   ]);
+});
+
+for (const [name, path, overrides, message] of [
+  ["missing web entry", "/", { status: 404 }, /expected HTTP 200/u],
+  [
+    "wrong document type",
+    "/",
+    { contentType: "application/json" },
+    /Content-Type text\/html/u,
+  ],
+  [
+    "placeholder page",
+    "/",
+    { body: "<html><body>Starting</body></html>" },
+    /root element/u,
+  ],
+  [
+    "missing built script",
+    "/",
+    { body: WEB_DOCUMENT.replace(/<script[^>]*><\/script>/u, "") },
+    /module script and stylesheet/u,
+  ],
+  [
+    "missing stylesheet",
+    "/",
+    { body: WEB_DOCUMENT.replace(/<link[^>]*>/u, "") },
+    /module script and stylesheet/u,
+  ],
+  [
+    "cross-origin script",
+    "/",
+    {
+      body: WEB_DOCUMENT.replace(
+        "/assets/index-test.js",
+        "https://unexpected.example/assets/index-test.js",
+      ),
+    },
+    /same-origin built asset/u,
+  ],
+  [
+    "unexpected script path",
+    "/",
+    { body: WEB_DOCUMENT.replace("/assets/index-test.js", "/api/v1/session") },
+    /same-origin built asset/u,
+  ],
+  [
+    "missing script",
+    "/assets/index-test.js",
+    { status: 404 },
+    /expected HTTP 200/u,
+  ],
+  [
+    "redirecting script",
+    "/assets/index-test.js",
+    { status: 302 },
+    /expected HTTP 200/u,
+  ],
+  [
+    "missing stylesheet file",
+    "/assets/index-test.css",
+    { status: 404 },
+    /expected HTTP 200/u,
+  ],
+  [
+    "script SPA fallback",
+    "/assets/index-test.js",
+    { contentType: "text/html", body: WEB_DOCUMENT },
+    /JavaScript Content-Type/u,
+  ],
+  [
+    "stylesheet SPA fallback",
+    "/assets/index-test.css",
+    { contentType: "text/html", body: WEB_DOCUMENT },
+    /Content-Type text\/css/u,
+  ],
+  ["empty script", "/assets/index-test.js", { body: " " }, /nonempty/u],
+  ["empty stylesheet", "/assets/index-test.css", { body: "" }, /nonempty/u],
+  [
+    "mislabeled HTML script",
+    "/assets/index-test.js",
+    { body: WEB_DOCUMENT },
+    /HTML fallback/u,
+  ],
+  [
+    "oversized document",
+    "/",
+    { body: WEB_DOCUMENT + " ".repeat(65_536) },
+    /exceeds 65536 bytes/u,
+  ],
+  [
+    "oversized script",
+    "/assets/index-test.js",
+    { body: "x".repeat(2_097_153) },
+    /exceeds 2097152 bytes/u,
+  ],
+  [
+    "excess asset references",
+    "/",
+    {
+      body: WEB_DOCUMENT.replace(
+        "</head>",
+        Array.from(
+          { length: 16 },
+          (_, index) =>
+            `<link rel="stylesheet" href="/assets/extra-${index}.css">`,
+        ).join("") + "</head>",
+      ),
+    },
+    /at most 16/u,
+  ],
+]) {
+  test(`the public smoke rejects ${name} before authentication`, async () => {
+    const application = await startMockApplication({
+      webResponses: { [path]: { ...WEB_RESPONSES[path], ...overrides } },
+    });
+    await assert.rejects(
+      runPublicSmoke({
+        baseUrl: application.baseUrl,
+        allowHttp: true,
+        readinessTimeoutMs: 1_000,
+        readinessIntervalMs: 10,
+        requestTimeoutMs: 1_000,
+      }),
+      (error) =>
+        error instanceof SmokeVerificationError &&
+        error.check === "public-web-entry-and-assets" &&
+        message.test(error.message),
+    );
+    assert.equal(application.state.loginAccepted, false);
+  });
+}
+
+test("the public smoke accepts exact byte and asset-count bounds with alternate JavaScript media type", async () => {
+  const extraLinks = Array.from(
+    { length: 14 },
+    (_, index) => `<link href='/assets/extra-${index}.css' rel='stylesheet'>`,
+  ).join("");
+  const document = WEB_DOCUMENT.replace("</head>", extraLinks + "</head>");
+  const webResponses = {
+    "/": { ...WEB_RESPONSES["/"], body: document.padEnd(65_536) },
+    "/assets/index-test.js": {
+      ...WEB_RESPONSES["/assets/index-test.js"],
+      contentType: "text/javascript; charset=utf-8",
+      body: "/*" + "x".repeat(2_097_148) + "*/",
+    },
+    ...Object.fromEntries(
+      Array.from({ length: 14 }, (_, index) => [
+        `/assets/extra-${index}.css`,
+        WEB_RESPONSES["/assets/index-test.css"],
+      ]),
+    ),
+  };
+  const application = await startMockApplication({ webResponses });
+  const result = await runPublicSmoke({
+    baseUrl: application.baseUrl,
+    allowHttp: true,
+    readinessTimeoutMs: 1_000,
+    readinessIntervalMs: 10,
+    requestTimeoutMs: 1_000,
+  });
+  assert.ok(result.checks.includes("public-web-entry-and-assets"));
+  assert.equal(application.state.webRequests.length, 17);
+});
+
+test("the public smoke bounds streamed UTF-8 bytes instead of character count", async () => {
+  const application = await startMockApplication({
+    webResponses: {
+      "/assets/index-test.js": {
+        ...WEB_RESPONSES["/assets/index-test.js"],
+        body: "é".repeat(1_048_577),
+      },
+    },
+  });
+  await assert.rejects(
+    runPublicSmoke({
+      baseUrl: application.baseUrl,
+      allowHttp: true,
+      requestTimeoutMs: 1_000,
+    }),
+    (error) =>
+      error instanceof SmokeVerificationError &&
+      error.check === "public-web-entry-and-assets" &&
+      /exceeds 2097152 bytes/u.test(error.message),
+  );
+  assert.equal(application.state.loginAccepted, false);
+});
+
+test("the public smoke deadline covers a stalled static body", async () => {
+  const application = await startMockApplication({
+    webResponses: {
+      "/assets/index-test.css": {
+        ...WEB_RESPONSES["/assets/index-test.css"],
+        stall: true,
+      },
+    },
+  });
+  await assert.rejects(
+    runPublicSmoke({
+      baseUrl: application.baseUrl,
+      allowHttp: true,
+      requestTimeoutMs: 100,
+    }),
+    (error) =>
+      error instanceof SmokeVerificationError &&
+      error.check === "public-web-entry-and-assets" &&
+      /within the request deadline/u.test(error.message),
+  );
+  assert.equal(application.state.loginAccepted, false);
 });
 
 test("the public smoke rejects malformed OpenAPI JSON", async () => {
