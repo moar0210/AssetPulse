@@ -1358,6 +1358,151 @@ describe("live alert experience", () => {
     expect(detailReads).toBe(3);
   });
 
+  it.each(
+    (["conflict", "uncertain"] as const).flatMap((reason) =>
+      (["503", "malformed"] as const).flatMap((failure) =>
+        (["success", "failure"] as const).map((trailingOutcome) => ({
+          reason,
+          failure,
+          trailingOutcome,
+        })),
+      ),
+    ),
+  )(
+    "keeps $reason recovery locked after $failure until its single trailing $trailingOutcome settles",
+    async ({ reason, failure, trailingOutcome }) => {
+      const { source, factory } = streamHarness();
+      const recovery = deferred<Response>();
+      const trailingRefresh = deferred<Response>();
+      const retryRefresh = deferred<Response>();
+      const onSessionExpired = vi.fn();
+      let detailReads = 0;
+      let commandCalls = 0;
+      const fetchMock = installFetch(async (url, init) => {
+        if (url === `/api/v1/alerts/${alertId}/acknowledge`) {
+          expect(init?.method).toBe("POST");
+          commandCalls += 1;
+          if (reason === "uncertain") {
+            throw new TypeError("command response lost");
+          }
+          return jsonResponse({}, 409);
+        }
+        expect(init?.method).toBe("GET");
+        if (url === `/api/v1/alerts/${alertId}`) {
+          detailReads += 1;
+          if (detailReads === 1) return jsonResponse(openDetail);
+          if (detailReads === 2) return recovery.promise;
+          if (detailReads === 3) return trailingRefresh.promise;
+          if (detailReads === 4) return retryRefresh.promise;
+          throw new Error("unexpected extra detail read");
+        }
+        if (url === "/api/v1/alerts?limit=50") return queueResponse();
+        throw new Error(`Unexpected URL ${url}`);
+      });
+
+      render(
+        <AlertPanel
+          roleCode="OPERATIONS_ADMIN"
+          csrfToken={csrfToken}
+          onSessionExpired={onSessionExpired}
+          createEventSource={factory}
+        />,
+      );
+      fireEvent.click(
+        await screen.findByRole("button", {
+          name: /view open alert for boiler feed pump/i,
+        }),
+      );
+      fireEvent.click(
+        await screen.findByRole("button", { name: "Acknowledge alert" }),
+      );
+      await waitFor(() => expect(detailReads).toBe(2));
+      const back = screen.getByRole("button", { name: "Back to alerts" });
+      back.focus();
+
+      await act(async () => source.emit("open"));
+      for (const changeType of ["STATUS_CHANGED", "OCCURRENCE_RECORDED"]) {
+        await act(async () =>
+          source.emit("alert-changed", { alertId, changeType }),
+        );
+      }
+      expect(detailReads).toBe(2);
+      await act(async () =>
+        recovery.resolve(
+          failure === "503"
+            ? jsonResponse({}, 503)
+            : jsonResponse({ id: alertId }),
+        ),
+      );
+      await waitFor(() => expect(detailReads).toBe(3));
+      expect(screen.getByText("1")).toBeVisible();
+      expect(
+        screen.getByText(
+          "Live refresh failed. The last confirmed alert detail is still shown.",
+        ),
+      ).toBeVisible();
+      const recoveringCommand = screen.getByRole("button", {
+        name: "Recovering latest state…",
+      });
+      expect(recoveringCommand).toBeDisabled();
+      expect(
+        screen.queryByRole("button", { name: "Retry latest state" }),
+      ).toBeNull();
+      fireEvent.click(recoveringCommand);
+      expect(commandCalls).toBe(1);
+      expect(back).toHaveFocus();
+
+      await act(async () =>
+        trailingRefresh.resolve(
+          trailingOutcome === "success"
+            ? jsonResponse(acknowledgedDetail)
+            : jsonResponse({}, 503),
+        ),
+      );
+      if (trailingOutcome === "failure") {
+        const lockedCommand = await screen.findByRole("button", {
+          name: "Latest state required",
+        });
+        expect(lockedCommand).toBeDisabled();
+        expect(
+          screen.getByText(/latest saved state could not be loaded/i),
+        ).toBeVisible();
+        expect(back).toHaveFocus();
+        fireEvent.click(lockedCommand);
+        expect(commandCalls).toBe(1);
+        expect(detailReads).toBe(3);
+
+        fireEvent.click(
+          screen.getByRole("button", { name: "Retry latest state" }),
+        );
+        await waitFor(() => expect(detailReads).toBe(4));
+        expect(
+          screen.getByRole("button", { name: "Recovering latest state…" }),
+        ).toBeDisabled();
+        await act(async () =>
+          retryRefresh.resolve(jsonResponse(acknowledgedDetail)),
+        );
+      } else {
+        expect(back).toHaveFocus();
+      }
+
+      expect(
+        await screen.findByRole("button", { name: "Resolve alert" }),
+      ).toBeEnabled();
+      expect(
+        screen.getByText(/latest saved state is now loaded/i),
+      ).toBeVisible();
+      expect(screen.queryByText(/Live refresh failed/)).toBeNull();
+      expect(detailReads).toBe(trailingOutcome === "success" ? 3 : 4);
+      expect(commandCalls).toBe(1);
+      expect(
+        fetchMock.mock.calls.filter(([, init]) => init?.method === "POST"),
+      ).toHaveLength(1);
+      expect(onSessionExpired).not.toHaveBeenCalled();
+      expect(source.close).not.toHaveBeenCalled();
+    },
+  );
+
   it("recovers an uncertain lost response before offering another command", async () => {
     const { factory } = streamHarness();
     let detailReads = 0;
