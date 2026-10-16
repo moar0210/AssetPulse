@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  DemoCommandUncertainError,
   DemoRequestVerificationError,
   DemoResetLimitExceededError,
   launchOverheatingScenario,
@@ -176,6 +177,80 @@ describe("demo API client", () => {
       expect.objectContaining({ method: "POST" }),
     );
     expect(fetchMock.mock.calls[0]?.[1]).not.toHaveProperty("body");
+  });
+
+  it.each([
+    "2026-02-30T18:00:00Z",
+    "2026-02-29T18:00:00Z",
+    "2026-08-31T24:00:00Z",
+    "2026-08-31 18:00:00Z",
+    "2026-08-31T18:00:00.1234567890Z",
+    "2026-08-31T18:00:00+19:00",
+    "+010000-01-01T00:00:00Z",
+  ])(
+    "treats malformed command time %s as uncertain without replay",
+    async (time) => {
+      const fetchMock = vi.fn<typeof fetch>(async (input, init) => {
+        if (input === "/api/v1/demo/reset") {
+          return jsonResponse({
+            resetAt: time,
+            alertsResolved: 2,
+            workOrdersCompleted: 1,
+          });
+        }
+        const body = JSON.parse(String(init?.body)) as {
+          idempotencyKey: string;
+        };
+        return jsonResponse({
+          batchId: "70000000-0000-0000-0000-000000000001",
+          idempotencyKey: body.idempotencyKey,
+          readingCount: 6,
+          acceptedAt: time,
+        });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      await expect
+        .soft(resetDemo(csrfToken))
+        .rejects.toBeInstanceOf(DemoCommandUncertainError);
+      await expect
+        .soft(launchOverheatingScenario(csrfToken))
+        .rejects.toBeInstanceOf(DemoCommandUncertainError);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it.each([
+    "0000-01-01T00:00:00Z",
+    "2000-02-29T18:00:00.123456789Z",
+    "2026-08-31T18:00:00+18:00",
+    "2026-08-31T18:00:00-18:00",
+    "9999-12-31T23:59:59.999999999Z",
+  ])("preserves the accepted command timestamp %s", async (time) => {
+    const fetchMock = vi.fn<typeof fetch>(async (input, init) => {
+      if (input === "/api/v1/demo/reset") {
+        return jsonResponse({
+          resetAt: time,
+          alertsResolved: 0,
+          workOrdersCompleted: 0,
+        });
+      }
+      const body = JSON.parse(String(init?.body)) as { idempotencyKey: string };
+      return jsonResponse({
+        batchId: "70000000-0000-0000-0000-000000000001",
+        idempotencyKey: body.idempotencyKey,
+        readingCount: 6,
+        acceptedAt: time,
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(resetDemo(csrfToken)).resolves.toHaveProperty("resetAt", time);
+    await expect(launchOverheatingScenario(csrfToken)).resolves.toHaveProperty(
+      "acceptedAt",
+      time,
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it("rejects reset counts above the server safety bound", async () => {
