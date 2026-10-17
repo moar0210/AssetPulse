@@ -160,6 +160,484 @@ function deferred<T>() {
 }
 
 describe("live alert experience", () => {
+  describe("ALR-03: bounded requests and command cancellation", () => {
+    function renderPanel() {
+      const { source, factory } = streamHarness();
+      const onSessionExpired = vi.fn();
+      const view = render(
+        <AlertPanel
+          roleCode="OPERATIONS_ADMIN"
+          csrfToken={csrfToken}
+          onSessionExpired={onSessionExpired}
+          createEventSource={factory}
+        />,
+      );
+      return { ...view, source, onSessionExpired };
+    }
+
+    async function openDetailScreen() {
+      fireEvent.click(
+        await screen.findByRole("button", {
+          name: /view open alert for boiler feed pump/i,
+        }),
+      );
+      await screen.findByRole("heading", { name: "High bearing temperature" });
+    }
+
+    function abortableResponse(signal: AbortSignal | null | undefined) {
+      return new Promise<Response>((_resolve, reject) => {
+        signal?.addEventListener(
+          "abort",
+          () => reject(new DOMException("Aborted", "AbortError")),
+          { once: true },
+        );
+      });
+    }
+
+    it.each(["queue", "detail"] as const)(
+      "aborts the first %s read at five seconds and permits an explicit retry",
+      async (target) => {
+        const targetUrl =
+          target === "queue"
+            ? "/api/v1/alerts?limit=50"
+            : `/api/v1/alerts/${alertId}`;
+        let targetReads = 0;
+        let timedSignal: AbortSignal | null | undefined;
+        const fetchMock = installFetch(async (url, init) => {
+          expect(init?.method).toBe("GET");
+          if (
+            url !== "/api/v1/alerts?limit=50" &&
+            url !== `/api/v1/alerts/${alertId}`
+          ) {
+            throw new Error(`Unexpected URL ${url}`);
+          }
+          if (url === targetUrl) {
+            targetReads += 1;
+            if (targetReads === 1) {
+              timedSignal = init?.signal;
+              return abortableResponse(timedSignal);
+            }
+          }
+          return url === `/api/v1/alerts/${alertId}`
+            ? jsonResponse(openDetail)
+            : queueResponse();
+        });
+
+        if (target === "queue") {
+          vi.useFakeTimers();
+        }
+        const { onSessionExpired } = renderPanel();
+        if (target === "detail") {
+          const row = await screen.findByRole("button", {
+            name: /view open alert for boiler feed pump/i,
+          });
+          vi.useFakeTimers();
+          fireEvent.click(row);
+        }
+        try {
+          expect(
+            screen.getByText(
+              target === "queue" ? "Loading alerts…" : "Loading alert details…",
+            ),
+          ).toBeVisible();
+          await act(async () => vi.advanceTimersByTimeAsync(4_999));
+          expect(timedSignal).toBeInstanceOf(AbortSignal);
+          expect(timedSignal?.aborted).toBe(false);
+          expect(targetReads).toBe(1);
+          await act(async () => vi.advanceTimersByTimeAsync(1));
+        } finally {
+          vi.useRealTimers();
+        }
+
+        expect(timedSignal?.aborted).toBe(true);
+        expect(screen.getByRole("alert")).toHaveTextContent(
+          target === "queue"
+            ? "We could not load alerts. Try again."
+            : "We could not load this alert. Try again.",
+        );
+        expect(targetReads).toBe(1);
+        fireEvent.click(
+          screen.getByRole("button", {
+            name: target === "queue" ? "Retry alerts" : "Retry alert details",
+          }),
+        );
+        expect(
+          await screen.findByRole(target === "queue" ? "button" : "heading", {
+            name:
+              target === "queue"
+                ? /view open alert for boiler feed pump/i
+                : "High bearing temperature",
+          }),
+        ).toBeVisible();
+        expect(targetReads).toBe(2);
+        expect(onSessionExpired).not.toHaveBeenCalled();
+        expect(
+          fetchMock.mock.calls.every(([, init]) => init?.method === "GET"),
+        ).toBe(true);
+      },
+    );
+
+    it.each(["queue", "detail"] as const)(
+      "retains confirmed %s data after refresh timeout and drains one trailing SSE refresh",
+      async (target) => {
+        const targetUrl =
+          target === "queue"
+            ? "/api/v1/alerts?limit=50"
+            : `/api/v1/alerts/${alertId}`;
+        const trailing = deferred<Response>();
+        let targetReads = 0;
+        let timedSignal: AbortSignal | null | undefined;
+        const fetchMock = installFetch(async (url, init) => {
+          expect(init?.method).toBe("GET");
+          if (
+            url !== "/api/v1/alerts?limit=50" &&
+            url !== `/api/v1/alerts/${alertId}`
+          ) {
+            throw new Error(`Unexpected URL ${url}`);
+          }
+          if (url === targetUrl) {
+            targetReads += 1;
+            if (targetReads === 2) {
+              timedSignal = init?.signal;
+              return abortableResponse(timedSignal);
+            }
+            if (targetReads === 3) {
+              return trailing.promise;
+            }
+          }
+          return url === `/api/v1/alerts/${alertId}`
+            ? jsonResponse(openDetail)
+            : queueResponse();
+        });
+        const { source, onSessionExpired } = renderPanel();
+        if (target === "detail") {
+          await openDetailScreen();
+        } else {
+          await screen.findByText("1 occurrence");
+        }
+
+        vi.useFakeTimers();
+        try {
+          await act(async () => source.emit("open"));
+          for (let index = 0; index < 3; index += 1) {
+            await act(async () =>
+              source.emit("alert-changed", {
+                alertId,
+                changeType: "OCCURRENCE_RECORDED",
+              }),
+            );
+          }
+          expect(targetReads).toBe(2);
+          await act(async () => vi.advanceTimersByTimeAsync(4_999));
+          expect(timedSignal?.aborted).toBe(false);
+          expect(targetReads).toBe(2);
+          await act(async () => vi.advanceTimersByTimeAsync(1));
+          expect(timedSignal?.aborted).toBe(true);
+          expect(targetReads).toBe(3);
+          expect(screen.getByRole("alert")).toHaveTextContent(
+            `Live refresh failed. The last confirmed alert ${target} is still shown.`,
+          );
+          expect(
+            target === "queue"
+              ? screen.getByText("1 occurrence")
+              : screen.getByRole("button", { name: "Acknowledge alert" }),
+          ).toBeVisible();
+          await act(async () =>
+            trailing.resolve(
+              target === "queue"
+                ? queueResponse([{ ...summary, occurrenceCount: 2 }])
+                : jsonResponse(refreshedOpenDetail),
+            ),
+          );
+        } finally {
+          vi.useRealTimers();
+        }
+
+        expect(
+          target === "queue"
+            ? screen.getByText("2 occurrences")
+            : screen.getByText("2", { selector: ".alert-facts dd" }),
+        ).toBeVisible();
+        expect(screen.queryByText(/Live refresh failed/)).toBeNull();
+        expect(targetReads).toBe(3);
+        expect(onSessionExpired).not.toHaveBeenCalled();
+        expect(
+          fetchMock.mock.calls.every(([, init]) => init?.method === "GET"),
+        ).toBe(true);
+      },
+    );
+
+    it.each(["acknowledge", "resolve"] as const)(
+      "recovers a timed-out %s command with one authoritative GET and no POST replay",
+      async (command) => {
+        const recovery = deferred<Response>();
+        const initial =
+          command === "acknowledge" ? openDetail : acknowledgedDetail;
+        const saved =
+          command === "acknowledge" ? acknowledgedDetail : resolvedDetail;
+        let detailReads = 0;
+        let timedSignal: AbortSignal | null | undefined;
+        const fetchMock = installFetch(async (url, init) => {
+          if (url === `/api/v1/alerts/${alertId}/${command}`) {
+            expect(init?.method).toBe("POST");
+            timedSignal = init?.signal;
+            return abortableResponse(timedSignal);
+          }
+          if (url === `/api/v1/alerts/${alertId}`) {
+            expect(init?.method).toBe("GET");
+            detailReads += 1;
+            return detailReads === 1 ? jsonResponse(initial) : recovery.promise;
+          }
+          if (url === "/api/v1/alerts?limit=50") {
+            expect(init?.method).toBe("GET");
+            return queueResponse();
+          }
+          throw new Error(`Unexpected URL ${url}`);
+        });
+        const { onSessionExpired } = renderPanel();
+        await openDetailScreen();
+        vi.useFakeTimers();
+        try {
+          fireEvent.click(
+            screen.getByRole("button", {
+              name:
+                command === "acknowledge"
+                  ? "Acknowledge alert"
+                  : "Resolve alert",
+            }),
+          );
+          await act(async () => vi.advanceTimersByTimeAsync(4_999));
+          expect(timedSignal?.aborted).toBe(false);
+          expect(detailReads).toBe(1);
+          await act(async () => vi.advanceTimersByTimeAsync(1));
+        } finally {
+          vi.useRealTimers();
+        }
+
+        expect(timedSignal?.aborted).toBe(true);
+        expect(
+          screen.getByRole("button", { name: "Recovering latest state…" }),
+        ).toBeDisabled();
+        expect(detailReads).toBe(2);
+        await act(async () => recovery.resolve(jsonResponse(saved)));
+        expect(screen.getByRole("alert")).toHaveTextContent(
+          "The command result could not be confirmed. The latest saved state is now loaded.",
+        );
+        if (command === "acknowledge") {
+          expect(
+            screen.getByRole("button", { name: "Resolve alert" }),
+          ).toBeEnabled();
+        } else {
+          expect(
+            screen.queryByRole("button", { name: "Resolve alert" }),
+          ).toBeNull();
+          expect(
+            screen.getByText("Resolved", { selector: ".alert-status" }),
+          ).toBeVisible();
+        }
+        expect(detailReads).toBe(2);
+        expect(
+          fetchMock.mock.calls.filter(([, init]) => init?.method === "POST"),
+        ).toHaveLength(1);
+        expect(
+          fetchMock.mock.calls.every(
+            ([url, init]) =>
+              init?.method ===
+              (String(url) === `/api/v1/alerts/${alertId}/${command}`
+                ? "POST"
+                : "GET"),
+          ),
+        ).toBe(true);
+        expect(onSessionExpired).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(["acknowledge", "resolve"] as const)(
+      "locks a conflicted %s command after recovery timeout until explicit GET retry",
+      async (command) => {
+        const initial =
+          command === "acknowledge" ? openDetail : acknowledgedDetail;
+        const saved =
+          command === "acknowledge" ? acknowledgedDetail : resolvedDetail;
+        let detailReads = 0;
+        let timedSignal: AbortSignal | null | undefined;
+        const fetchMock = installFetch(async (url, init) => {
+          if (url === `/api/v1/alerts/${alertId}/${command}`) {
+            expect(init?.method).toBe("POST");
+            return jsonResponse({}, 409);
+          }
+          if (url === `/api/v1/alerts/${alertId}`) {
+            expect(init?.method).toBe("GET");
+            detailReads += 1;
+            if (detailReads === 2) {
+              timedSignal = init?.signal;
+              return abortableResponse(timedSignal);
+            }
+            return jsonResponse(detailReads === 1 ? initial : saved);
+          }
+          if (url === "/api/v1/alerts?limit=50") {
+            expect(init?.method).toBe("GET");
+            return queueResponse();
+          }
+          throw new Error(`Unexpected URL ${url}`);
+        });
+        const { onSessionExpired } = renderPanel();
+        await openDetailScreen();
+        vi.useFakeTimers();
+        try {
+          await act(async () =>
+            fireEvent.click(
+              screen.getByRole("button", {
+                name:
+                  command === "acknowledge"
+                    ? "Acknowledge alert"
+                    : "Resolve alert",
+              }),
+            ),
+          );
+          expect(detailReads).toBe(2);
+          await act(async () => vi.advanceTimersByTimeAsync(4_999));
+          expect(timedSignal?.aborted).toBe(false);
+          await act(async () => vi.advanceTimersByTimeAsync(1));
+        } finally {
+          vi.useRealTimers();
+        }
+
+        expect(timedSignal?.aborted).toBe(true);
+        const lockedCommand = screen.getByRole("button", {
+          name: "Latest state required",
+        });
+        expect(lockedCommand).toBeDisabled();
+        expect(
+          screen.getByText(/latest saved state could not be loaded/i),
+        ).toBeVisible();
+        expect(detailReads).toBe(2);
+        fireEvent.click(lockedCommand);
+        fireEvent.click(
+          screen.getByRole("button", { name: "Retry latest state" }),
+        );
+        await screen.findByText(/latest saved state is now loaded/i);
+        if (command === "acknowledge") {
+          expect(
+            screen.getByRole("button", { name: "Resolve alert" }),
+          ).toBeEnabled();
+        } else {
+          expect(
+            screen.queryByRole("button", { name: "Resolve alert" }),
+          ).toBeNull();
+        }
+        expect(detailReads).toBe(3);
+        expect(
+          fetchMock.mock.calls.filter(([, init]) => init?.method === "POST"),
+        ).toHaveLength(1);
+        expect(
+          fetchMock.mock.calls.every(
+            ([url, init]) =>
+              init?.method ===
+              (String(url) === `/api/v1/alerts/${alertId}/${command}`
+                ? "POST"
+                : "GET"),
+          ),
+        ).toBe(true);
+        expect(onSessionExpired).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(
+      (["Back", "unmount"] as const).flatMap((navigation) =>
+        (["success", "401", "409"] as const).map((outcome) => ({
+          navigation,
+          outcome,
+        })),
+      ),
+    )(
+      "aborts a command on $navigation and ignores its late $outcome after leaving detail",
+      async ({ navigation, outcome }) => {
+        const pending = deferred<Response>();
+        let commandSignal: AbortSignal | null | undefined;
+        let detailReads = 0;
+        const fetchMock = installFetch(async (url, init) => {
+          if (url === `/api/v1/alerts/${alertId}/acknowledge`) {
+            expect(init?.method).toBe("POST");
+            commandSignal = init?.signal;
+            return pending.promise;
+          }
+          if (url === `/api/v1/alerts/${alertId}`) {
+            expect(init?.method).toBe("GET");
+            detailReads += 1;
+            return jsonResponse(openDetail);
+          }
+          if (url === "/api/v1/alerts?limit=50") {
+            expect(init?.method).toBe("GET");
+            return queueResponse();
+          }
+          throw new Error(`Unexpected URL ${url}`);
+        });
+        const { unmount, source, onSessionExpired } = renderPanel();
+        await openDetailScreen();
+        fireEvent.click(
+          screen.getByRole("button", { name: "Acknowledge alert" }),
+        );
+        expect(commandSignal).toBeInstanceOf(AbortSignal);
+        expect(commandSignal?.aborted).toBe(false);
+
+        if (navigation === "Back") {
+          fireEvent.click(
+            screen.getByRole("button", { name: "Back to alerts" }),
+          );
+          expect(commandSignal?.aborted).toBe(true);
+          await openDetailScreen();
+          expect(detailReads).toBe(2);
+        } else {
+          unmount();
+          expect(commandSignal?.aborted).toBe(true);
+          expect(source.close).toHaveBeenCalledOnce();
+        }
+        const callsAfterLeaving = fetchMock.mock.calls.length;
+        await act(async () =>
+          pending.resolve(
+            outcome === "success"
+              ? jsonResponse(acknowledgedDetail)
+              : jsonResponse({}, Number(outcome)),
+          ),
+        );
+
+        expect(fetchMock).toHaveBeenCalledTimes(callsAfterLeaving);
+        expect(
+          fetchMock.mock.calls.filter(([, init]) => init?.method === "POST"),
+        ).toHaveLength(1);
+        expect(
+          fetchMock.mock.calls.every(
+            ([url, init]) =>
+              init?.method ===
+              (String(url) === `/api/v1/alerts/${alertId}/acknowledge`
+                ? "POST"
+                : "GET"),
+          ),
+        ).toBe(true);
+        expect(onSessionExpired).not.toHaveBeenCalled();
+        expect(screen.queryByText("Alert acknowledged.")).toBeNull();
+        expect(
+          screen.queryByText(/Recovering the latest saved state/),
+        ).toBeNull();
+        if (navigation === "Back") {
+          expect(
+            screen.getByRole("button", { name: "Acknowledge alert" }),
+          ).toBeEnabled();
+          expect(
+            screen.queryByRole("button", { name: "Resolve alert" }),
+          ).toBeNull();
+          expect(source.close).not.toHaveBeenCalled();
+        } else {
+          expect(detailReads).toBe(1);
+          expect(
+            screen.queryByRole("heading", { name: "High bearing temperature" }),
+          ).toBeNull();
+        }
+      },
+    );
+  });
+
   it("renders a bounded queue and retains an explicit empty live state", async () => {
     const { factory } = streamHarness();
     installFetch(async () => queueResponse());
@@ -879,6 +1357,151 @@ describe("live alert experience", () => {
     );
     expect(detailReads).toBe(3);
   });
+
+  it.each(
+    (["conflict", "uncertain"] as const).flatMap((reason) =>
+      (["503", "malformed"] as const).flatMap((failure) =>
+        (["success", "failure"] as const).map((trailingOutcome) => ({
+          reason,
+          failure,
+          trailingOutcome,
+        })),
+      ),
+    ),
+  )(
+    "keeps $reason recovery locked after $failure until its single trailing $trailingOutcome settles",
+    async ({ reason, failure, trailingOutcome }) => {
+      const { source, factory } = streamHarness();
+      const recovery = deferred<Response>();
+      const trailingRefresh = deferred<Response>();
+      const retryRefresh = deferred<Response>();
+      const onSessionExpired = vi.fn();
+      let detailReads = 0;
+      let commandCalls = 0;
+      const fetchMock = installFetch(async (url, init) => {
+        if (url === `/api/v1/alerts/${alertId}/acknowledge`) {
+          expect(init?.method).toBe("POST");
+          commandCalls += 1;
+          if (reason === "uncertain") {
+            throw new TypeError("command response lost");
+          }
+          return jsonResponse({}, 409);
+        }
+        expect(init?.method).toBe("GET");
+        if (url === `/api/v1/alerts/${alertId}`) {
+          detailReads += 1;
+          if (detailReads === 1) return jsonResponse(openDetail);
+          if (detailReads === 2) return recovery.promise;
+          if (detailReads === 3) return trailingRefresh.promise;
+          if (detailReads === 4) return retryRefresh.promise;
+          throw new Error("unexpected extra detail read");
+        }
+        if (url === "/api/v1/alerts?limit=50") return queueResponse();
+        throw new Error(`Unexpected URL ${url}`);
+      });
+
+      render(
+        <AlertPanel
+          roleCode="OPERATIONS_ADMIN"
+          csrfToken={csrfToken}
+          onSessionExpired={onSessionExpired}
+          createEventSource={factory}
+        />,
+      );
+      fireEvent.click(
+        await screen.findByRole("button", {
+          name: /view open alert for boiler feed pump/i,
+        }),
+      );
+      fireEvent.click(
+        await screen.findByRole("button", { name: "Acknowledge alert" }),
+      );
+      await waitFor(() => expect(detailReads).toBe(2));
+      const back = screen.getByRole("button", { name: "Back to alerts" });
+      back.focus();
+
+      await act(async () => source.emit("open"));
+      for (const changeType of ["STATUS_CHANGED", "OCCURRENCE_RECORDED"]) {
+        await act(async () =>
+          source.emit("alert-changed", { alertId, changeType }),
+        );
+      }
+      expect(detailReads).toBe(2);
+      await act(async () =>
+        recovery.resolve(
+          failure === "503"
+            ? jsonResponse({}, 503)
+            : jsonResponse({ id: alertId }),
+        ),
+      );
+      await waitFor(() => expect(detailReads).toBe(3));
+      expect(screen.getByText("1")).toBeVisible();
+      expect(
+        screen.getByText(
+          "Live refresh failed. The last confirmed alert detail is still shown.",
+        ),
+      ).toBeVisible();
+      const recoveringCommand = screen.getByRole("button", {
+        name: "Recovering latest state…",
+      });
+      expect(recoveringCommand).toBeDisabled();
+      expect(
+        screen.queryByRole("button", { name: "Retry latest state" }),
+      ).toBeNull();
+      fireEvent.click(recoveringCommand);
+      expect(commandCalls).toBe(1);
+      expect(back).toHaveFocus();
+
+      await act(async () =>
+        trailingRefresh.resolve(
+          trailingOutcome === "success"
+            ? jsonResponse(acknowledgedDetail)
+            : jsonResponse({}, 503),
+        ),
+      );
+      if (trailingOutcome === "failure") {
+        const lockedCommand = await screen.findByRole("button", {
+          name: "Latest state required",
+        });
+        expect(lockedCommand).toBeDisabled();
+        expect(
+          screen.getByText(/latest saved state could not be loaded/i),
+        ).toBeVisible();
+        expect(back).toHaveFocus();
+        fireEvent.click(lockedCommand);
+        expect(commandCalls).toBe(1);
+        expect(detailReads).toBe(3);
+
+        fireEvent.click(
+          screen.getByRole("button", { name: "Retry latest state" }),
+        );
+        await waitFor(() => expect(detailReads).toBe(4));
+        expect(
+          screen.getByRole("button", { name: "Recovering latest state…" }),
+        ).toBeDisabled();
+        await act(async () =>
+          retryRefresh.resolve(jsonResponse(acknowledgedDetail)),
+        );
+      } else {
+        expect(back).toHaveFocus();
+      }
+
+      expect(
+        await screen.findByRole("button", { name: "Resolve alert" }),
+      ).toBeEnabled();
+      expect(
+        screen.getByText(/latest saved state is now loaded/i),
+      ).toBeVisible();
+      expect(screen.queryByText(/Live refresh failed/)).toBeNull();
+      expect(detailReads).toBe(trailingOutcome === "success" ? 3 : 4);
+      expect(commandCalls).toBe(1);
+      expect(
+        fetchMock.mock.calls.filter(([, init]) => init?.method === "POST"),
+      ).toHaveLength(1);
+      expect(onSessionExpired).not.toHaveBeenCalled();
+      expect(source.close).not.toHaveBeenCalled();
+    },
+  );
 
   it("recovers an uncertain lost response before offering another command", async () => {
     const { factory } = streamHarness();

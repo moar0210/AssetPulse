@@ -1,0 +1,116 @@
+{
+  "sourceRevision": "939f1de22564ae2f29a7e0621c6279ab7836f0f2",
+  "environment": "Local composite image constrained to 0.1 CPU and 512 MiB, with its own PostgreSQL database",
+  "hostingImageId": "sha256:120202d470e888609fde07b15987d79281ea63bd00b6f4479004eabc1a5ffadc",
+  "metrics": [
+    {
+      "observed_at": "2026-10-16T00:49:53.975159060Z",
+      "http_request_count": 36,
+      "http_error_count": 3,
+      "http_average_duration_ms": 1177.3764439722222,
+      "http_max_duration_ms": 9709.184604,
+      "telemetry_pending_count": 0,
+      "telemetry_processing_lag_seconds": 0,
+      "telemetry_retrying_count": 0,
+      "telemetry_dead_count": 0
+    },
+    {
+      "observed_at": "2026-10-16T00:50:51.050735729Z",
+      "http_request_count": 83,
+      "http_error_count": 3,
+      "http_average_duration_ms": 694.5946736024097,
+      "http_max_duration_ms": 9709.184604,
+      "telemetry_pending_count": 0,
+      "telemetry_processing_lag_seconds": 0,
+      "telemetry_retrying_count": 0,
+      "telemetry_dead_count": 0
+    }
+  ],
+  "requestSamples": [
+    {
+      "@timestamp": "2026-10-16T00:50:33.077262512Z",
+      "correlation_id": "830f6d60-fca1-4ea0-9cf1-b2b3c45314b7",
+      "http_method": "GET",
+      "http_route": "/api/v1/alerts",
+      "http_status": 200,
+      "duration_ms": 63.633,
+      "actor_id": "10000000-0000-0000-0000-000000000001",
+      "organisation_id": "00000000-0000-0000-0000-000000000001",
+      "actor_role": "OPERATIONS_ADMIN"
+    },
+    {
+      "@timestamp": "2026-10-16T00:50:33.182325431Z",
+      "correlation_id": "c550a79d-2e76-4339-b547-83a0b15c305b",
+      "http_method": "DELETE",
+      "http_route": "/api/**",
+      "http_status": 204,
+      "duration_ms": 101.382,
+      "actor_id": "10000000-0000-0000-0000-000000000001",
+      "organisation_id": "00000000-0000-0000-0000-000000000001",
+      "actor_role": "OPERATIONS_ADMIN"
+    }
+  ],
+  "trace": {
+    "traceId": "775f7050c1ca7d49686853030538ec5e",
+    "acceptance": {
+      "spanId": "4648d6ea0842befa",
+      "name": "assetpulse.telemetry.accept",
+      "startTimeUnixNano": "1792111827676945690",
+      "endTimeUnixNano": "1792111827879765693"
+    },
+    "processing": {
+      "spanId": "de0b9865c671a6da",
+      "parentSpanId": "4648d6ea0842befa",
+      "name": "assetpulse.telemetry.process",
+      "startTimeUnixNano": "1792111832587366266",
+      "endTimeUnixNano": "1792111832685564226"
+    },
+    "durableEvents": [
+      {
+        "@timestamp": "2026-10-16T00:50:27.879257931Z",
+        "trace_phase": "accepted",
+        "flow_id": "529b670b-9c7b-4968-a7cd-1969ec5aa1cd",
+        "telemetry_batch_id": "745180aa-f1f9-419a-b19b-ebadda1de025"
+      },
+      {
+        "@timestamp": "2026-10-16T00:50:32.587413325Z",
+        "trace_phase": "processing_started",
+        "flow_id": "529b670b-9c7b-4968-a7cd-1969ec5aa1cd",
+        "telemetry_batch_id": "745180aa-f1f9-419a-b19b-ebadda1de025"
+      },
+      {
+        "@timestamp": "2026-10-16T00:50:32.684812385Z",
+        "trace_phase": "alert_recorded",
+        "flow_id": "529b670b-9c7b-4968-a7cd-1969ec5aa1cd",
+        "telemetry_batch_id": "745180aa-f1f9-419a-b19b-ebadda1de025",
+        "alert_id": "9fa8b5ac-ab3c-43c1-b897-efd7f39a7177"
+      },
+      {
+        "@timestamp": "2026-10-16T00:50:32.685074612Z",
+        "trace_phase": "alert_recorded",
+        "flow_id": "529b670b-9c7b-4968-a7cd-1969ec5aa1cd",
+        "telemetry_batch_id": "745180aa-f1f9-419a-b19b-ebadda1de025",
+        "alert_id": "9fa8b5ac-ab3c-43c1-b897-efd7f39a7177"
+      },
+      {
+        "@timestamp": "2026-10-16T00:50:32.685240308Z",
+        "trace_phase": "alert_recorded",
+        "flow_id": "529b670b-9c7b-4968-a7cd-1969ec5aa1cd",
+        "telemetry_batch_id": "745180aa-f1f9-419a-b19b-ebadda1de025",
+        "alert_id": "9fa8b5ac-ab3c-43c1-b897-efd7f39a7177"
+      },
+      {
+        "@timestamp": "2026-10-16T00:50:32.685401790Z",
+        "trace_phase": "processing_completed",
+        "flow_id": "529b670b-9c7b-4968-a7cd-1969ec5aa1cd",
+        "telemetry_batch_id": "745180aa-f1f9-419a-b19b-ebadda1de025"
+      }
+    ]
+  },
+  "limits": [
+    "Sanitized excerpts, not a complete log export.",
+    "Actor identifiers belong to seeded synthetic accounts.",
+    "Request counters are cumulative for this process; max duration reflects the registry window.",
+    "Local measurements do not establish hosted capacity."
+  ]
+}

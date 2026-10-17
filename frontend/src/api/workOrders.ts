@@ -1,3 +1,5 @@
+import { parseInstant } from "./instant";
+
 import type { CsrfToken } from "./session";
 
 export const DEFAULT_WORK_ORDER_LIMIT = 50;
@@ -123,9 +125,6 @@ const PROBLEM_JSON_MEDIA_TYPE = "application/problem+json";
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const CONFIGURATION_KEY_PATTERN = /^[A-Z0-9]+(?:-[A-Z0-9]+)*$/;
-const ISO_INSTANT_PATTERN =
-  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?(Z|[+-]\d{2}:\d{2})$/;
-const NANOSECONDS_PER_MILLISECOND = 1_000_000n;
 const WORK_ORDER_KEYS = [
   "id",
   "alertId",
@@ -164,51 +163,6 @@ function isBoundedTrimmedText(
     value.length > 0 &&
     value.length <= maximumLength &&
     value.trim() === value
-  );
-}
-
-function parseInstant(value: unknown): bigint | null {
-  if (typeof value !== "string" || value.trim() !== value) {
-    return null;
-  }
-  const match = ISO_INSTANT_PATTERN.exec(value);
-  if (match === null) {
-    return null;
-  }
-  const year = Number(match[1]);
-  const month = Number(match[2]);
-  const day = Number(match[3]);
-  const hour = Number(match[4]);
-  const minute = Number(match[5]);
-  const second = Number(match[6]);
-  const fraction = match[7] ?? "";
-  const offset = match[8]!;
-  const instant = new Date(0);
-  instant.setUTCFullYear(year, month - 1, day);
-  instant.setUTCHours(hour, minute, second, 0);
-  if (
-    instant.getUTCFullYear() !== year ||
-    instant.getUTCMonth() !== month - 1 ||
-    instant.getUTCDate() !== day ||
-    instant.getUTCHours() !== hour ||
-    instant.getUTCMinutes() !== minute ||
-    instant.getUTCSeconds() !== second
-  ) {
-    return null;
-  }
-  let offsetMinutes = 0;
-  if (offset !== "Z") {
-    const hours = Number(offset.slice(1, 3));
-    const minutes = Number(offset.slice(4, 6));
-    if (hours > 18 || minutes > 59 || (hours === 18 && minutes !== 0)) {
-      return null;
-    }
-    offsetMinutes = (hours * 60 + minutes) * (offset.startsWith("+") ? 1 : -1);
-  }
-  return (
-    BigInt(instant.getTime() - offsetMinutes * 60_000) *
-      NANOSECONDS_PER_MILLISECOND +
-    BigInt(fraction.padEnd(9, "0") || "0")
   );
 }
 

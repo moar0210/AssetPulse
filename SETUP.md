@@ -136,6 +136,11 @@ Use **Java 21** with `JAVA_HOME` set and **Node 24**. The Maven Wrapper download
 the pinned Maven version; a separate Maven install is unnecessary. Docker must
 be running for the PostgreSQL/Testcontainers backend tests.
 
+Use a checkout path without `#` when running frontend tools directly. The
+verified Windows toolchain can fail to resolve test dependencies from a path
+containing that character. A normal path such as `C:\Projects\AssetPulse` avoids
+the issue; container builds use their own internal paths.
+
 From `backend`, run `./mvnw clean verify` in Bash or
 `.\mvnw.cmd clean verify` in PowerShell, then return to the repository root.
 

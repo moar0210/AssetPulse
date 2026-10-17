@@ -1,3 +1,5 @@
+import { parseInstant } from "./instant";
+
 export const DEFAULT_TELEMETRY_LIMIT = 100;
 export const MAX_TELEMETRY_LIMIT = 500;
 export const MAX_TELEMETRY_RANGE_MS = 24 * 60 * 60 * 1_000;
@@ -33,8 +35,6 @@ export class TelemetrySessionExpiredError extends Error {
 const JSON_MEDIA_TYPE = "application/json";
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const ISO_INSTANT_PATTERN =
-  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?(Z|[+-]\d{2}:\d{2})$/;
 const NANOSECONDS_PER_MILLISECOND = 1_000_000n;
 const MAX_TELEMETRY_RANGE_NANOSECONDS =
   BigInt(MAX_TELEMETRY_RANGE_MS) * NANOSECONDS_PER_MILLISECOND;
@@ -56,72 +56,6 @@ function isExactRecord(
 
 function isUuid(value: unknown): value is string {
   return typeof value === "string" && UUID_PATTERN.test(value);
-}
-
-function parseInstant(value: unknown): bigint | null {
-  if (
-    typeof value !== "string" ||
-    value.length === 0 ||
-    value.trim() !== value
-  ) {
-    return null;
-  }
-
-  const match = ISO_INSTANT_PATTERN.exec(value);
-  if (match === null) {
-    return null;
-  }
-
-  const [, yearText, monthText, dayText, hourText, minuteText, secondText] =
-    match;
-  const fraction = match[7] ?? "";
-  const offset = match[8];
-  const year = Number(yearText);
-  const month = Number(monthText);
-  const day = Number(dayText);
-  const hour = Number(hourText);
-  const minute = Number(minuteText);
-  const second = Number(secondText);
-
-  const calendarInstant = new Date(0);
-  calendarInstant.setUTCFullYear(year, month - 1, day);
-  calendarInstant.setUTCHours(hour, minute, second, 0);
-
-  if (
-    calendarInstant.getUTCFullYear() !== year ||
-    calendarInstant.getUTCMonth() !== month - 1 ||
-    calendarInstant.getUTCDate() !== day ||
-    calendarInstant.getUTCHours() !== hour ||
-    calendarInstant.getUTCMinutes() !== minute ||
-    calendarInstant.getUTCSeconds() !== second
-  ) {
-    return null;
-  }
-
-  let offsetMinutes = 0;
-  if (offset !== "Z") {
-    const offsetHours = Number(offset.slice(1, 3));
-    const offsetMinutePart = Number(offset.slice(4, 6));
-    if (
-      offsetHours > 18 ||
-      offsetMinutePart > 59 ||
-      (offsetHours === 18 && offsetMinutePart !== 0)
-    ) {
-      return null;
-    }
-
-    offsetMinutes =
-      (offsetHours * 60 + offsetMinutePart) * (offset.startsWith("+") ? 1 : -1);
-  }
-
-  const epochMilliseconds =
-    calendarInstant.getTime() - offsetMinutes * 60 * 1_000;
-  const fractionalNanoseconds = BigInt(fraction.padEnd(9, "0") || "0");
-
-  return (
-    BigInt(epochMilliseconds) * NANOSECONDS_PER_MILLISECOND +
-    fractionalNanoseconds
-  );
 }
 
 function isTelemetryReading(

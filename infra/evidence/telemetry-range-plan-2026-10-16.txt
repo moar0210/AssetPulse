@@ -1,0 +1,23 @@
+SET
+BEGIN
+SET
+SET
+                                                                                                                                                 QUERY PLAN
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Sort  (cost=8.19..8.19 rows=1 width=44) (actual time=0.064..0.065 rows=18 loops=1)
+   Sort Key: telemetry_reading.observed_at, telemetry_reading.id
+   Sort Method: quicksort  Memory: 25kB
+   Buffers: shared hit=8
+   ->  Limit  (cost=0.15..8.18 rows=1 width=44) (actual time=0.022..0.026 rows=18 loops=1)
+         Buffers: shared hit=2
+         ->  Index Only Scan using ix_telemetry_reading_organisation_sensor_observed_id on telemetry_reading  (cost=0.15..8.18 rows=1 width=44) (actual time=0.021..0.024 rows=18 loops=1)
+               Index Cond: ((organisation_id = '00000000-0000-0000-0000-000000000001'::uuid) AND (sensor_id = '30000000-0000-0000-0000-000000000001'::uuid) AND (observed_at >= '2026-10-15 01:00:00+00'::timestamp with time zone) AND (observed_at < '2026-10-16 01:00:00+00'::timestamp with time zone))
+               Heap Fetches: 18
+               Buffers: shared hit=2
+ Planning:
+   Buffers: shared hit=187
+ Planning Time: 0.934 ms
+ Execution Time: 0.106 ms
+(14 rows)
+
+ROLLBACK

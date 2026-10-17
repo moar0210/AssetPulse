@@ -14,6 +14,14 @@ revision byte for byte. The
 passed all four required jobs. These are dated observations; the final release
 review and v1.0 acceptance are still ahead.
 
+On 16 October, GitHub's deployment record identifies the current public image as
+[`6c6f800`](https://github.com/moar0210/AssetPulse/commit/6c6f800c589fc25a05d7ff2acc149194c00956fa).
+All 10 expanded smoke checks and all three public browser journeys pass. The
+[October verification package](infra/evidence/OCTOBER-2026.md) separates these
+hosted results from the newer locally verified finalization candidate, including
+clean-clone, security, performance and compatible-rollback evidence. The newer
+candidate has not yet been merged or deployed.
+
 ## Topology
 
 ```text

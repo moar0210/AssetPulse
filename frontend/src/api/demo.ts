@@ -1,3 +1,4 @@
+import { parseInstant } from "./instant";
 import type { CsrfToken } from "./session";
 
 export type DemoResetResult = Readonly<{
@@ -70,15 +71,6 @@ function isExactRecord(
   return (
     actualKeys.length === expectedKeys.length &&
     expectedKeys.every((key) => Object.hasOwn(value, key))
-  );
-}
-
-function isIsoInstant(value: unknown): value is string {
-  return (
-    typeof value === "string" &&
-    value.trim() === value &&
-    !Number.isNaN(Date.parse(value)) &&
-    /(?:Z|[+-]\d{2}:\d{2})$/.test(value)
   );
 }
 
@@ -214,7 +206,7 @@ export async function launchOverheatingScenario(
       !UUID_PATTERN.test(payload.batchId) ||
       payload.idempotencyKey !== request.idempotencyKey ||
       payload.readingCount !== request.readings.length ||
-      !isIsoInstant(payload.acceptedAt)
+      parseInstant(payload.acceptedAt) === null
     ) {
       throw new Error("unexpected scenario response");
     }
@@ -253,7 +245,7 @@ export async function resetDemo(
         "alertsResolved",
         "workOrdersCompleted",
       ]) ||
-      !isIsoInstant(payload.resetAt) ||
+      parseInstant(payload.resetAt) === null ||
       !isResetCount(payload.alertsResolved) ||
       !isResetCount(payload.workOrdersCompleted)
     ) {
