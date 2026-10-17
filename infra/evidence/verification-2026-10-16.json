@@ -1,0 +1,156 @@
+{
+  "observedOnUtc": "2026-10-16",
+  "candidateSourceRevision": "939f1de22564ae2f29a7e0621c6279ab7836f0f2",
+  "candidateImage": {
+    "id": "sha256:120202d470e888609fde07b15987d79281ea63bd00b6f4479004eabc1a5ffadc",
+    "revisionLabel": "finalization-candidate",
+    "sourceMapping": "Runtime source hash-matched before and after all checks; subsequently committed as the candidateSourceRevision."
+  },
+  "deployedRevision": "6c6f800c589fc25a05d7ff2acc149194c00956fa",
+  "publicOrigin": "https://assetpulse-rv4z.onrender.com",
+  "githubDeployment": {
+    "id": 7050650373,
+    "status": "success",
+    "statusAtUtc": "2026-10-13T21:36:09Z"
+  },
+  "runtimes": {
+    "localJava": "21.0.3",
+    "containerJava": "21.0.11_10",
+    "localNode": "24.19.0",
+    "containerNode": "24.14.0",
+    "postgres": "17.10",
+    "vitest": "4.1.11",
+    "trivy": "0.70.0",
+    "k6": "1.7.1"
+  },
+  "checks": {
+    "backend": {
+      "passed": 353,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "normalShutdown": true
+    },
+    "frontend": {
+      "passed": 494,
+      "files": 20,
+      "format": true,
+      "lint": true,
+      "lintInvalidControlExit": 1,
+      "typecheck": true,
+      "productionBuild": true
+    },
+    "simulatorContractSmokePerformanceHelpers": 81,
+    "nativeVulnerabilityPolicyCases": 32,
+    "localRealBackendJourneys": 3,
+    "deployedJourneys": 3,
+    "accessibility": "Desktop and 390px mobile serious/critical axe and overflow checks in all three journeys",
+    "localSmoke": 10,
+    "publicSmoke": 10,
+    "constrainedHostingSmoke": 10
+  },
+  "dependencyAudit": {
+    "all": {
+      "info": 0,
+      "low": 0,
+      "moderate": 0,
+      "high": 0,
+      "critical": 0,
+      "total": 0
+    },
+    "production": {
+      "info": 0,
+      "low": 0,
+      "moderate": 0,
+      "high": 0,
+      "critical": 0,
+      "total": 0
+    }
+  },
+  "scans": {
+    "sourceCriticalGate": "pass with existing scoped VEX",
+    "repositoryDetectedSecrets": 0,
+    "rawImageCriticalFindings": [
+      {
+        "VulnerabilityID": "CVE-2026-47884",
+        "PkgName": "org.springframework:spring-webmvc",
+        "InstalledVersion": "6.2.19",
+        "Severity": "CRITICAL"
+      },
+      {
+        "VulnerabilityID": "CVE-2026-47890",
+        "PkgName": "org.springframework:spring-webmvc",
+        "InstalledVersion": "6.2.19",
+        "Severity": "CRITICAL"
+      }
+    ],
+    "activeImageCriticalFindings": 0,
+    "dispositions": [
+      "../security/CVE-2026-47884.md",
+      "../security/CVE-2026-47890.md"
+    ],
+    "database": {
+      "Version": 2,
+      "NextUpdate": "2026-10-16T19:09:25.631493777Z",
+      "UpdatedAt": "2026-10-15T19:09:25.631494278Z",
+      "DownloadedAt": "2026-10-16T00:42:04.3444724Z"
+    }
+  },
+  "cleanClone": {
+    "observedAt": "2026-10-16T00:55:42.5749090Z",
+    "sourceRevision": "939f1de22564ae2f29a7e0621c6279ab7836f0f2",
+    "cleanClone": true,
+    "freshMigrations": 16,
+    "organisations": 2,
+    "users": 4,
+    "assets": 3,
+    "ordinaryDownPreservedVolume": true,
+    "durableRowsUnchanged": true,
+    "postResumeExactRetry": true,
+    "readingCount": 6,
+    "eventCount": 1,
+    "localCookieSecure": false
+  },
+  "rollback": {
+    "observedAt": "2026-10-16T00:55:55.4127654Z",
+    "previousRevision": "6c6f800c589fc25a05d7ff2acc149194c00956fa",
+    "candidateRevision": "939f1de",
+    "migrationsIdentical": 16,
+    "rollbackRowsUnchanged": true,
+    "restoreRowsUnchanged": true,
+    "rollbackSmokeChecks": 10,
+    "restoreSmokeChecks": 10,
+    "scope": "Local application-image rollback on the same disposable PostgreSQL database; no provider rollback or backup restore"
+  },
+  "constrainedStartup": {
+    "ready": true,
+    "startupMs": 136720.8885,
+    "observedAt": "2026-10-16T00:46:54.0244709Z"
+  },
+  "runtime": {
+    "cpuLimit": 0.1,
+    "memoryLimitMiB": 512,
+    "processLimit": 128,
+    "nonRootUser": "10001:10001",
+    "readOnlyRoot": true,
+    "observedMemoryMiB": 181.1,
+    "oomKilled": false,
+    "restarts": 0,
+    "connectionPoolMaximum": 4,
+    "workerPollMilliseconds": 5000
+  },
+  "firstPublicRequest": {
+    "observedAt": "2026-10-16T00:26:04.7529836Z",
+    "status": 200,
+    "body": "{\"status\":\"available\"}",
+    "elapsedMs": 116398.1047,
+    "note": "First request on October 16; prior idle duration unverified"
+  },
+  "limitations": [
+    "The candidate is not yet merged or deployed. Normal PR review and exact release/deployment checks remain part of v1 release work.",
+    "Local rollback is distinct from the historical provider rollback rehearsal.",
+    "The first local timing run failed closed on newer simulator observations; the unchanged quiet rerun passed.",
+    "The first public request is not a controlled cold-start measurement because preceding idle duration is unknown.",
+    "Final README, demonstration, release version alignment and v1 publication are deferred."
+  ]
+}
