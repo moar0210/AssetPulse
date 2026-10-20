@@ -70,8 +70,8 @@ function renderDashboard(
     onOpenAlerts: vi.fn(),
     ...overrides,
   };
-  render(<DashboardPanel {...props} />);
-  return props;
+  const { unmount } = render(<DashboardPanel {...props} />);
+  return { ...props, unmount };
 }
 
 describe("integrated dashboard", () => {
@@ -152,6 +152,74 @@ describe("integrated dashboard", () => {
     expect(command?.[1]?.headers).toEqual(
       expect.objectContaining({ "X-CSRF-TOKEN": "csrf-token" }),
     );
+  });
+
+  it.each(["scenario", "reset"] as const)(
+    "ignores a late %s session error after leaving the dashboard",
+    async (command) => {
+      let finishCommand!: (response: Response) => void;
+      const fetchMock = vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(dashboardResponse())
+        .mockReturnValueOnce(
+          new Promise<Response>((resolve) => {
+            finishCommand = resolve;
+          }),
+        );
+      vi.stubGlobal("fetch", fetchMock);
+      const { unmount, onSessionExpired, onOpenAlerts } = renderDashboard();
+      await screen.findByLabelText("Dashboard counts");
+
+      if (command === "reset") {
+        fireEvent.click(screen.getByRole("button", { name: "Prepare reset" }));
+        fireEvent.click(screen.getByRole("button", { name: "Confirm reset" }));
+      } else {
+        fireEvent.click(
+          screen.getByRole("button", { name: "Launch and open alerts" }),
+        );
+      }
+      const signal = fetchMock.mock.calls[1][1]?.signal;
+      unmount();
+      expect(signal?.aborted).toBe(true);
+      await act(async () => finishCommand(jsonResponse({}, 401)));
+
+      expect(onSessionExpired).not.toHaveBeenCalled();
+      expect(onOpenAlerts).not.toHaveBeenCalled();
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it("does not navigate when a scenario finishes after leaving the dashboard", async () => {
+    let finishCommand!: (response: Response) => void;
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(dashboardResponse())
+      .mockReturnValueOnce(
+        new Promise<Response>((resolve) => {
+          finishCommand = resolve;
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const { unmount, onOpenAlerts } = renderDashboard();
+    await screen.findByLabelText("Dashboard counts");
+    fireEvent.click(
+      screen.getByRole("button", { name: "Launch and open alerts" }),
+    );
+    const body = JSON.parse(String(fetchMock.mock.calls[1][1]?.body)) as {
+      idempotencyKey: string;
+    };
+    unmount();
+    await act(async () =>
+      finishCommand(
+        jsonResponse({
+          batchId: "70000000-0000-0000-0000-000000000001",
+          idempotencyKey: body.idempotencyKey,
+          readingCount: 6,
+          acceptedAt: "2026-08-31T18:00:00Z",
+        }),
+      ),
+    );
+    expect(onOpenAlerts).not.toHaveBeenCalled();
   });
 
   it("requires explicit confirmation, resets, focuses feedback, and refreshes counts", async () => {

@@ -150,6 +150,7 @@ export function DashboardPanel({
   useEffect(
     () => () => {
       commandController.current?.abort();
+      commandController.current = null;
     },
     [],
   );
@@ -228,8 +229,11 @@ export function DashboardPanel({
     const command = startCommand();
     try {
       await launchOverheatingScenario(csrfToken, command.controller.signal);
+      if (commandController.current !== command.controller) return;
+      command.controller.signal.throwIfAborted();
       onOpenAlerts();
     } catch (error: unknown) {
+      if (commandController.current !== command.controller) return;
       if (
         error instanceof DemoSessionExpiredError ||
         error instanceof DemoRequestVerificationError
@@ -253,6 +257,8 @@ export function DashboardPanel({
     const command = startCommand();
     try {
       const result = await resetDemo(csrfToken, command.controller.signal);
+      if (commandController.current !== command.controller) return;
+      command.controller.signal.throwIfAborted();
       setResetState({
         kind: "succeeded",
         alertsResolved: result.alertsResolved,
@@ -260,6 +266,7 @@ export function DashboardPanel({
       });
       setDashboardRequest({ resetToRecover: null });
     } catch (error: unknown) {
+      if (commandController.current !== command.controller) return;
       if (
         error instanceof DemoSessionExpiredError ||
         error instanceof DemoRequestVerificationError

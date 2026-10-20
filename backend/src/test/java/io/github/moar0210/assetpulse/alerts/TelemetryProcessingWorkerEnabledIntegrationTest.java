@@ -14,6 +14,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.ApplicationContext;
 import org.springframework.jdbc.core.simple.JdbcClient;
+import org.springframework.test.annotation.DirtiesContext;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.testcontainers.containers.PostgreSQLContainer;
@@ -27,6 +28,7 @@ import org.testcontainers.utility.DockerImageName;
             "assetpulse.telemetry.processing.initial-delay-millis=3600000",
             "assetpulse.telemetry.processing.poll-delay-millis=3600000"
         })
+@DirtiesContext
 @Testcontainers
 class TelemetryProcessingWorkerEnabledIntegrationTest {
 
