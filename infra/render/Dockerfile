@@ -38,7 +38,7 @@ RUN apk add --no-cache bash ca-certificates gettext nginx tini \
 WORKDIR /app
 
 COPY --from=backend-build --chown=10001:10001 \
-    /workspace/backend/target/assetpulse-backend-0.0.1-SNAPSHOT.jar \
+    /workspace/backend/target/assetpulse-backend-1.0.0.jar \
     /app/app.jar
 COPY --from=frontend-build --chown=10001:10001 \
     /workspace/frontend/dist \

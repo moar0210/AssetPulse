@@ -2,8 +2,8 @@
   "@context": "https://openvex.dev/ns/v0.2.0",
   "@id": "https://github.com/moar0210/AssetPulse/blob/main/infra/security/spring-mvc-source.vex.json",
   "author": "AssetPulse maintainers",
-  "timestamp": "2026-10-10T15:26:03Z",
-  "version": 2,
+  "timestamp": "2026-10-21T10:18:28Z",
+  "version": 3,
   "statements": [
     {
       "vulnerability": {
@@ -11,7 +11,7 @@
       },
       "products": [
         {
-          "@id": "pkg:maven/io.github.moar0210/assetpulse-backend@0.0.1-SNAPSHOT",
+          "@id": "pkg:maven/io.github.moar0210/assetpulse-backend@1.0.0",
           "subcomponents": [
             {
               "@id": "pkg:maven/org.springframework/spring-webmvc@6.2.19"
@@ -29,7 +29,7 @@
       },
       "products": [
         {
-          "@id": "pkg:maven/io.github.moar0210/assetpulse-backend@0.0.1-SNAPSHOT",
+          "@id": "pkg:maven/io.github.moar0210/assetpulse-backend@1.0.0",
           "subcomponents": [
             {
               "@id": "pkg:maven/org.springframework/spring-webmvc@6.2.19"

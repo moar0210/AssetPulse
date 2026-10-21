@@ -13,7 +13,7 @@
 
     <groupId>io.github.moar0210</groupId>
     <artifactId>assetpulse-backend</artifactId>
-    <version>0.0.1-SNAPSHOT</version>
+    <version>1.0.0</version>
     <name>AssetPulse Backend</name>
     <description>AssetPulse Lite backend</description>
 
