@@ -4,8 +4,10 @@ Verification on **16 October 2026** covers candidate source
 [`939f1de`](https://github.com/moar0210/AssetPulse/commit/939f1de22564ae2f29a7e0621c6279ab7836f0f2)
 and, separately, the existing public deployment
 [`6c6f800`](https://github.com/moar0210/AssetPulse/commit/6c6f800c589fc25a05d7ff2acc149194c00956fa).
-The candidate is not yet merged or deployed. Final README, demonstration media,
-release version alignment and v1 publication remain release work.
+At that checkpoint, the candidate had not yet been merged or deployed. Final
+README, demonstration media, version alignment and v1 publication were still
+release work. See the [release notes](https://github.com/moar0210/AssetPulse/releases)
+for subsequent releases; the measurements below retain their original scope.
 
 The [machine-readable verification record](verification-2026-10-16.json)
 contains exact revisions, image identity, runtimes, scan scope, startup, clean-clone
@@ -136,8 +138,8 @@ The previous image used one CPU to shorten rehearsal; the restored candidate
 retained its measured 0.1-CPU limit. This is application-image compatibility
 evidence, distinct from the September provider rollback and from backup restore.
 
-Normal PR review, merge, version-aligned candidate checks, final public artifact
-identity and the v1 tag remain the release gate. Shared accounts, process-local
+At this checkpoint, PR review, merge, version-aligned candidate checks, final
+public artifact identity and the v1 tag were still pending. Shared accounts, process-local
 sessions/SSE, free-host sleep and accumulating synthetic history remain the
 documented limits in [hosting](../../HOSTING.md),
 [architecture](../../ARCHITECTURE.md) and [security](../../SECURITY.md).

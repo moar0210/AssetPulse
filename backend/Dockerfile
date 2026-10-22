@@ -22,7 +22,7 @@ RUN addgroup -S -g 10001 assetpulse \
 WORKDIR /app
 
 COPY --from=build --chown=assetpulse:assetpulse \
-    /workspace/target/assetpulse-backend-0.0.1-SNAPSHOT.jar app.jar
+    /workspace/target/assetpulse-backend-1.0.0.jar app.jar
 
 USER 10001:10001
 

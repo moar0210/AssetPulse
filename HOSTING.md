@@ -5,22 +5,16 @@ on one Render Free web service with Neon Free PostgreSQL. It uses synthetic data
 and shared seeded accounts. See [local setup and demo accounts](SETUP.md) to run
 your own copy or follow the maintenance journey.
 
-On 12 September 2026, Render identified the live application as
-[`1b0311b`](https://github.com/moar0210/AssetPulse/commit/1b0311ba7822471cf159f030b48d2ad5dac9db99).
-All nine public smoke checks passed, and the served
-[OpenAPI contract](https://assetpulse-rv4z.onrender.com/openapi.json) matched that
-revision byte for byte. The
-[verification run](https://github.com/moar0210/AssetPulse/actions/runs/34270179665)
-passed all four required jobs. These are dated observations; the final release
-review and v1.0 acceptance are still ahead.
+See the [release notes](https://github.com/moar0210/AssetPulse/releases) for
+released revisions and their verification. The public
+[OpenAPI contract](https://assetpulse-rv4z.onrender.com/openapi.json) describes
+the deployed API.
 
-On 16 October, GitHub's deployment record identifies the current public image as
-[`6c6f800`](https://github.com/moar0210/AssetPulse/commit/6c6f800c589fc25a05d7ff2acc149194c00956fa).
-All 10 expanded smoke checks and all three public browser journeys pass. The
-[October verification package](infra/evidence/OCTOBER-2026.md) separates these
-hosted results from the newer locally verified finalization candidate, including
-clean-clone, security, performance and compatible-rollback evidence. The newer
-candidate has not yet been merged or deployed.
+The [September](infra/evidence/SEPTEMBER-2026.md) and
+[October](infra/evidence/OCTOBER-2026.md) evidence packages record earlier checks,
+including clean startup, browser journeys, security, performance and compatible
+rollback. Each names the source and deployed revisions it tested. These are
+dated observations, not claims about every later deployment.
 
 ## Topology
 
